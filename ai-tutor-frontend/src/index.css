@@ -11,7 +11,6 @@ body, html, #root {
   background-color: #0a0a0a;
 }
 
-/* --- LOGIN PAGE AESTHETICS --- */
 .login-page {
   background: linear-gradient(135deg, #050505 0%, #1c1c1c 100%);
   color: white;
@@ -163,7 +162,6 @@ body, html, #root {
   color: #555;
 }
 
-/* --- DASHBOARD HEADER LAYOUT --- */
 .dashboard-layout {
   display: flex;
   flex-direction: column;
@@ -212,7 +210,6 @@ body, html, #root {
   color: #111;
 }
 
-/* --- DASHBOARD AND CLASSROOM VIEWS --- */
 .app-workspace {
   flex: 1;
   display: flex;
@@ -256,7 +253,6 @@ body, html, #root {
   color: black;
 }
 
-/* HISTORY SIDEBAR SECTION */
 .history-section {
   flex: 1;
   overflow-y: auto;
@@ -286,6 +282,9 @@ body, html, #root {
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .history-item:hover {
@@ -313,7 +312,20 @@ body, html, #root {
   line-height: 1.5;
 }
 
-/* ACTIVE CLASS UI ELEMENTS */
+.delete-history-btn {
+  background: none;
+  border: none;
+  color: #8da394;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px;
+  transition: color 0.2s;
+}
+
+.delete-history-btn:hover {
+  color: #ff4d4d;
+}
+
 .status-meta-card {
   background-color: #113123;
   border: 1px solid #1a4733;
@@ -403,7 +415,6 @@ body, html, #root {
   background-color: #51826a;
 }
 
-/* MAIN BOARD / CHALKBOARD AREA */
 .classroom-main-board {
   flex: 1;
   background-color: transparent; 
@@ -462,7 +473,6 @@ body, html, #root {
   background-color: #e69500;
 }
 
-/* RENDERED BLOCKS IN CHALKBOARD */
 .board-scrollable-container {
   max-width: 850px;
   margin: 0 auto;
