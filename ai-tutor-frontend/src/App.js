@@ -9,37 +9,6 @@ const resetVoiceEngine = () => {
   if (window.speechSynthesis) {
     window.speechSynthesis.resume();
     window.speechSynthesis.cancel();
-    const dummy = new SpeechSynthesisUtterance("");
-    dummy.volume = 0;
-    window.speechSynthesis.speak(dummy);
-  }
-};
-
-const speakText = (text) => {
-  if (!window.speechSynthesis) return;
-  window.speechSynthesis.resume(); 
-  const cleanText = text.replace(/\[.*?\]/g, '').trim();
-  if (!cleanText) return;
-
-  const utterance = new SpeechSynthesisUtterance(cleanText);
-  const setVoiceAndSpeak = () => {
-    const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find(v => v.name === "Google UK English Female") ||
-                  voices.find(v => v.name === "Microsoft Zira - English (United States)") ||
-                  voices.find(v => v.name === "Samantha") || 
-                  voices.find(v => v.name.toLowerCase().includes("female")) || 
-                  voices[0];
-                  
-    if (voice) utterance.voice = voice;
-    utterance.rate = 0.90; 
-    utterance.pitch = 1.1; 
-    window.speechSynthesis.speak(utterance);
-  };
-
-  if (window.speechSynthesis.getVoices().length === 0) {
-    window.speechSynthesis.onvoiceschanged = setVoiceAndSpeak;
-  } else {
-    setVoiceAndSpeak();
   }
 };
 
@@ -67,7 +36,7 @@ const WikipediaImage = ({ query }) => {
       } catch (e) {
         console.error("Image fetch failed", e);
       }
-      setImgUrl(`https://placehold.co/600x350/131314/ffe699?text=${encodeURIComponent(query)}`);
+      setImgUrl(`https://placehold.co/600x350/0b2e1b/ffe699?text=${encodeURIComponent(query)}`);
     };
     fetchImage();
   }, [query]);
@@ -98,35 +67,51 @@ const CanvasDiagram = ({ instructions }) => {
     ctx.strokeStyle = '#ffe699';
     ctx.fillStyle = '#ffe699';
     ctx.lineWidth = 3;
-    ctx.font = '18px "Segoe UI", sans-serif';
+    ctx.font = '18px "Caveat", cursive';
 
     ctx.beginPath();
     const inst = instructions.toLowerCase();
     
-    // NEW: Handles Right Triangles for Pythagoras and Trigonometry
     if (inst.includes('right triangle')) {
         ctx.moveTo(150, 50); ctx.lineTo(150, 250); ctx.lineTo(350, 250); ctx.closePath();
         ctx.fillText("A", 140, 40); ctx.fillText("B", 130, 260); ctx.fillText("C", 360, 260);
-        ctx.strokeRect(150, 230, 20, 20); // Draws the 90-degree square symbol
+        ctx.strokeRect(150, 230, 20, 20); 
     } 
-    // Normal equilateral triangle
     else if (inst.includes('triangle')) {
         ctx.moveTo(250, 40); ctx.lineTo(100, 240); ctx.lineTo(400, 240); ctx.closePath();
         ctx.fillText("A", 240, 30); ctx.fillText("B", 80, 260); ctx.fillText("C", 410, 260);
-    } else if (inst.includes('circuit') || inst.includes('physics')) {
+    } 
+    else if (inst.includes('circuit')) {
         ctx.strokeRect(100, 80, 300, 140);
         ctx.clearRect(230, 75, 40, 10); ctx.fillText("┠┨ V", 225, 70);
         ctx.clearRect(230, 215, 40, 10); ctx.strokeRect(230, 210, 40, 10); ctx.fillText("R", 245, 245);
-    } else if (inst.includes('graph') || inst.includes('parabola') || inst.includes('plot')) {
+    } 
+    else if (inst.includes('graph') || inst.includes('parabola') || inst.includes('plot')) {
         ctx.moveTo(50, 250); ctx.lineTo(450, 250); 
         ctx.moveTo(250, 30); ctx.lineTo(250, 270);
         ctx.moveTo(100, 50); ctx.quadraticCurveTo(250, 350, 400, 50);
         ctx.fillText("y", 260, 40); ctx.fillText("x", 440, 270);
-    } else if (inst.includes('circle')) {
+    } 
+    else if (inst.includes('circle')) {
         ctx.arc(250, 150, 100, 0, 2 * Math.PI);
         ctx.fillText("r", 255, 145);
         ctx.moveTo(250, 150); ctx.lineTo(350, 150);
-    } else {
+    } 
+    else if (inst.includes('force') || inst.includes('block')) {
+        ctx.moveTo(100, 250); ctx.lineTo(400, 250);
+        ctx.strokeRect(200, 150, 100, 100);
+        ctx.fillText("Mass", 230, 205);
+        ctx.moveTo(250, 250); ctx.lineTo(250, 290);
+        ctx.lineTo(245, 280); ctx.moveTo(250, 290); ctx.lineTo(255, 280);
+        ctx.fillText("mg", 260, 290);
+        ctx.moveTo(250, 150); ctx.lineTo(250, 100);
+        ctx.lineTo(245, 110); ctx.moveTo(250, 100); ctx.lineTo(255, 110);
+        ctx.fillText("N", 260, 115);
+        ctx.moveTo(300, 200); ctx.lineTo(360, 200);
+        ctx.lineTo(350, 195); ctx.moveTo(360, 200); ctx.lineTo(350, 205);
+        ctx.fillText("F", 365, 205);
+    } 
+    else {
         ctx.strokeRect(150, 100, 200, 100);
         ctx.fillText(instructions.substring(0, 20), 160, 150);
     }
@@ -138,10 +123,9 @@ const CanvasDiagram = ({ instructions }) => {
         <canvas 
           ref={canvasRef} 
           width={500} 
-          height={300} 
-          style={{ backgroundColor: '#11291d', border: '2px dashed #ffe699', borderRadius: '8px', maxWidth: '100%' }} 
+          height={350} 
+          style={{ backgroundColor: 'rgba(11, 46, 27, 0.5)', border: '2px dashed rgba(255, 230, 153, 0.4)', borderRadius: '8px', maxWidth: '100%' }} 
         />
-        <div style={{ color: '#ffe699', marginTop: '10px', fontStyle: 'italic', fontSize: '14px' }}>Generated Diagram: {instructions}</div>
       </div>
   );
 };
@@ -189,11 +173,52 @@ export default function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [questionsAsked, setQuestionsAsked] = useState([]);
   
+  const [audioQueue, setAudioQueue] = useState([]);
+  const [isPlaying, setIsPlaying] = useState(false);
+
   const rawBufferRef = useRef('');
   const processedUpToRef = useRef(0);
   const scrollRef = useRef(null);
   const lessonContextRef = useRef(''); 
   const abortControllerRef = useRef(null);
+
+  useEffect(() => {
+    if (!isPlaying && audioQueue.length > 0 && !isPaused && window.speechSynthesis) {
+      setIsPlaying(true);
+      const text = audioQueue[0];
+      const cleanText = text.replace(/\[.*?\]/g, '').trim();
+      
+      if (!cleanText) {
+        setAudioQueue(prev => prev.slice(1));
+        setIsPlaying(false);
+        return;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const voices = window.speechSynthesis.getVoices();
+      const voice = voices.find(v => v.name === "Google UK English Female") ||
+                    voices.find(v => v.name === "Microsoft Zira - English (United States)") ||
+                    voices.find(v => v.name === "Samantha") || 
+                    voices.find(v => v.name.toLowerCase().includes("female")) || 
+                    voices[0];
+                    
+      if (voice) utterance.voice = voice;
+      utterance.rate = 0.90; 
+      utterance.pitch = 1.1; 
+      
+      utterance.onend = () => {
+        setAudioQueue(prev => prev.slice(1));
+        setIsPlaying(false);
+      };
+      
+      utterance.onerror = () => {
+        setAudioQueue(prev => prev.slice(1));
+        setIsPlaying(false);
+      };
+
+      window.speechSynthesis.speak(utterance);
+    }
+  }, [audioQueue, isPlaying, isPaused]);
 
   const fetchHistory = async () => {
     try {
@@ -204,6 +229,19 @@ export default function App() {
       }
     } catch (e) {
       console.error("Failed to fetch history from database", e);
+    }
+  };
+
+  const deleteHistoryItem = async (e, id) => {
+    e.stopPropagation();
+    try {
+      await fetch(`${API}/history/${id}`, { method: 'DELETE' });
+      setPastClasses(prev => prev.filter(cls => cls.id !== id));
+      if (viewPastClass && viewPastClass.id === id) {
+        setViewPastClass(null);
+      }
+    } catch (e) {
+      console.error("Failed to delete history item", e);
     }
   };
 
@@ -236,7 +274,7 @@ export default function App() {
 
   const processRaw = useCallback((raw) => {
     setBlocks(prev => {
-      const tagRe = /\[(HEADING|POINT|MATH|IMAGE|EXPLAIN|CODE|DIAGRAM)\]([\s\S]*?)\[\/\1\]/gi;
+      const tagRe = /\[(HEADING|POINT|MATH|IMAGE|EXPLAIN|CODE|DIAGRAM|QUESTION|QUIZ|WARNING|SUMMARY|HOMEWORK)\]([\s\S]*?)\[\/\1\]/gi;
       tagRe.lastIndex = 0;
       let match;
       const newBlocks = [];
@@ -249,12 +287,12 @@ export default function App() {
           const content = (match[2] || '').trim();
           processedUpToRef.current = endPos;
 
-          if (tag === 'EXPLAIN' || tag === 'POINT' || tag === 'MATH' || tag === 'CODE' || tag === 'DIAGRAM') {
+          if (tag === 'EXPLAIN' || tag === 'POINT' || tag === 'MATH' || tag === 'CODE' || tag === 'DIAGRAM' || tag === 'QUESTION') {
             lessonContextRef.current += content + '\n';
           }
 
           if (tag === 'EXPLAIN') {
-            speakText(content);
+            setAudioQueue(q => [...q, content]);
           } else {
             newBlocks.push({ tag, content, id: `block-${endPos}` });
           }
@@ -274,6 +312,8 @@ export default function App() {
     setIsStreaming(true);
     setIsPaused(false);
     setQuestionsAsked([]);
+    setAudioQueue([]);
+    setIsPlaying(false);
     rawBufferRef.current = '';
     processedUpToRef.current = 0;
     lessonContextRef.current = ''; 
@@ -302,6 +342,8 @@ export default function App() {
     const question = interruption;
     setQuestionsAsked(prev => [...prev, question]);
     setInterruption('');
+    setAudioQueue([]);
+    setIsPlaying(false);
     resetVoiceEngine(); 
     
     const history = [
@@ -352,6 +394,8 @@ export default function App() {
     setBlocks([]);
     setInterruption('');
     setQuestionsAsked([]);
+    setAudioQueue([]);
+    setIsPlaying(false);
     rawBufferRef.current = '';
     processedUpToRef.current = 0;
     lessonContextRef.current = ''; 
@@ -364,7 +408,6 @@ export default function App() {
     setViewPastClass(null);
     setIsAuthenticated(false);
   };
-
 
   if (!isAuthenticated) {
     return (
@@ -411,12 +454,43 @@ export default function App() {
     );
   }
 
-  // Hide header dynamically if a live class is currently active.
   const showHeader = !started || viewPastClass;
+
+  const renderBlock = (step) => {
+    switch(step.tag) {
+      case 'HEADING': return <h1 className="rendered-heading">{step.content}</h1>;
+      case 'POINT': return (
+        <div className="rendered-point-row">
+          <span className="point-bullet-marker">•</span>
+          <span className="point-text-content">{step.content}</span>
+        </div>
+      );
+      case 'MATH': return (
+        <div className="rendered-math-container">
+          <BlockMath math={step.content} />
+        </div>
+      );
+      case 'IMAGE': return (
+        <div className="rendered-media-frame">
+          <WikipediaImage query={step.content} />
+        </div>
+      );
+      case 'DIAGRAM': return <CanvasDiagram instructions={step.content} />;
+      case 'CODE': return (
+        <div className="rendered-code-container">
+          <pre><code>{step.content}</code></pre>
+        </div>
+      );
+      case 'WARNING': return <div className="rendered-warning">⚠️ {step.content}</div>;
+      case 'QUESTION': return <div className="rendered-question">🤔 {step.content}</div>;
+      case 'SUMMARY': return <div className="rendered-summary">📌 {step.content}</div>;
+      case 'HOMEWORK': return <div className="rendered-homework">📝 {step.content}</div>;
+      default: return null;
+    }
+  };
 
   return (
     <div className="dashboard-layout">
-      {/* Top Header Section - Conditionally rendered based on active class */}
       {showHeader && (
         <header className="dashboard-header">
           <div className="logo-area">
@@ -431,16 +505,14 @@ export default function App() {
         </header>
       )}
 
-      {/* Main Workspace Area */}
       <div className="app-workspace">
-        {/* VIEW: RECORDING PLAYBACK */}
         {viewPastClass && (
           <>
             <div className="left-sidebar-panel">
               <div className="sidebar-top-section">
                 <div className="brand-title">
                   Cogni-Learn <span role="img" aria-label="graduation cap">🎓</span>
-                  <button className="exit-action-btn" onClick={() => setViewPastClass(null)}>BACK</button>
+                  <button className="exit-action-btn" onClick={() => setViewPastClass(null)}>QUIT</button>
                 </div>
 
                 <div className="status-meta-card">
@@ -467,32 +539,7 @@ export default function App() {
               <div className="board-scrollable-container">
                 {viewPastClass.blocks.map((step) => (
                   <div key={step.id} className="board-render-element">
-                    {step.tag === 'HEADING' && <h1 className="rendered-heading">{step.content}</h1>}
-                    {step.tag === 'POINT' && (
-                      <div className="rendered-point-row">
-                        <span className="point-bullet-marker">•</span>
-                        <span className="point-text-content">{step.content}</span>
-                      </div>
-                    )}
-                    {step.tag === 'MATH' && (
-                      <div className="rendered-math-container">
-                        <BlockMath math={step.content} />
-                      </div>
-                    )}
-                    {step.tag === 'IMAGE' && (
-                      <div className="rendered-media-frame">
-                        <WikipediaImage query={step.content} />
-                        <div className="media-caption-bar">Displaying Images for {step.content}</div>
-                      </div>
-                    )}
-                    {step.tag === 'DIAGRAM' && (
-                      <CanvasDiagram instructions={step.content} />
-                    )}
-                    {step.tag === 'CODE' && (
-                      <div className="rendered-code-container">
-                        <pre><code>{step.content}</code></pre>
-                      </div>
-                    )}
+                    {renderBlock(step)}
                   </div>
                 ))}
               </div>
@@ -500,7 +547,6 @@ export default function App() {
           </>
         )}
 
-        {/* VIEW: DASHBOARD (NOT STARTED) */}
         {!started && !viewPastClass && (
           <>
             <div className="left-sidebar-panel">
@@ -515,8 +561,13 @@ export default function App() {
                   
                   {pastClasses.map(cls => (
                     <div key={cls.id} className="history-item" onClick={() => setViewPastClass(cls)}>
-                      <div className="history-topic">{cls.topic}</div>
-                      <div className="history-date">{cls.date}</div>
+                      <div style={{flex: 1}}>
+                        <div className="history-topic">{cls.topic}</div>
+                        <div className="history-date">{cls.date}</div>
+                      </div>
+                      <button className="delete-history-btn" onClick={(e) => deleteHistoryItem(e, cls.id)}>
+                        ✖
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -542,7 +593,6 @@ export default function App() {
           </>
         )}
 
-        {/* VIEW: ACTIVE LIVE CLASS */}
         {started && !viewPastClass && (
           <>
             <div className="left-sidebar-panel">
@@ -577,11 +627,11 @@ export default function App() {
                   className="realtime-feedback-box"
                   value={interruption} 
                   onChange={e => setInterruption(e.target.value)} 
-                  placeholder="Raise your hand to ask a doubt..." 
+                  placeholder="Answer questions or ask a doubt..." 
                   onKeyPress={e => e.key === 'Enter' && handleInterrupt()}
                 />
                 <button className="submit-ask-btn" onClick={handleInterrupt}>
-                  Ask Doubt
+                  Submit
                 </button>
               </div>
             </div>
@@ -596,32 +646,7 @@ export default function App() {
                       animate={{ opacity: 1, y: 0 }}
                       className="board-render-element"
                     >
-                      {step.tag === 'HEADING' && <h1 className="rendered-heading">{step.content}</h1>}
-                      {step.tag === 'POINT' && (
-                        <div className="rendered-point-row">
-                          <span className="point-bullet-marker">•</span>
-                          <span className="point-text-content">{step.content}</span>
-                        </div>
-                      )}
-                      {step.tag === 'MATH' && (
-                        <div className="rendered-math-container">
-                          <BlockMath math={step.content} />
-                        </div>
-                      )}
-                      {step.tag === 'IMAGE' && (
-                        <div className="rendered-media-frame">
-                          <WikipediaImage query={step.content} />
-                          <div className="media-caption-bar">Displaying Images for {step.content}</div>
-                        </div>
-                      )}
-                      {step.tag === 'DIAGRAM' && (
-                        <CanvasDiagram instructions={step.content} />
-                      )}
-                      {step.tag === 'CODE' && (
-                        <div className="rendered-code-container">
-                          <pre><code>{step.content}</code></pre>
-                        </div>
-                      )}
+                      {renderBlock(step)}
                     </motion.div>
                   ))}
                 </AnimatePresence>

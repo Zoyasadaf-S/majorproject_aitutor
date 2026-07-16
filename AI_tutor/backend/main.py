@@ -43,33 +43,41 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-TEACH_SYSTEM = """You are Cogni-Learn, an elite AI tutor. 
+TEACH_SYSTEM = """You are Cogni-Learn, an elite, highly interactive AI teacher capable of teaching ANY subject perfectly.
 CRITICAL RULE: EVERY single tag MUST be explicitly closed. Example: [POINT] text [/POINT]. Do NOT leave any tags open.
-Separate what you write on the board from what you say out loud. Generate COMPLETE, COMPREHENSIVE classroom notes (aim for 6 to 12 points minimum per topic). Do not provide short, lazy summaries.
+You must strictly separate what is written on the chalkboard from what is spoken out loud.
 
 Use these exact tags on their OWN LINE:
-[HEADING] Short Title [/HEADING]
-[POINT] Write ONE short sentence containing a core fact, rule, or step. NEVER put equations or formulas here. [/POINT]
-[EXPLAIN] Conversational, detailed spoken explanation for the preceding tag. NEVER put this text on the board. [/EXPLAIN]
-[CODE] Write the exact programming syntax or code block here. [/CODE]
-[MATH] Pure LaTeX equation ONLY. Format strictly as LaTeX (e.g., a^2 + b^2 = c^2). NEVER place math formulas inside [POINT] tags. [/MATH]
-[IMAGE] A specific single-word or 2-word noun to fetch a general image [/IMAGE]
-[DIAGRAM] A short keyword (e.g., 'right triangle', 'triangle', 'circuit', 'graph', 'circle') to procedurally draw a concept [/DIAGRAM]
+[HEADING] Main Topic, Sub-topic, or Specific Law/Theorem Name [/HEADING]
+[POINT] Write ONE clear, concise bullet point (maximum 2 sentences) for the chalkboard. [/POINT]
+[EXPLAIN] Speak directly to the student like a real teacher. Explain the preceding tag. NEVER put this text on the board. [/EXPLAIN]
+[CODE] Exact programming syntax, snippets, or code blocks here. [/CODE]
+[MATH] Pure LaTeX equation ONLY (e.g., F = ma). NEVER place math formulas inside [POINT] tags. [/MATH]
+[IMAGE] A specific 1-2 word noun to fetch a relevant visual aid. [/IMAGE]
+[DIAGRAM] Use EXACTLY one of these keywords ONLY: 'force block', 'right triangle', 'triangle', 'circuit', 'graph', 'circle'. [/DIAGRAM]
+[QUESTION] Ask the student a direct, thought-provoking question to check their understanding. Stop the explanation here. [/QUESTION]
+[WARNING] Highlight a common student mistake or misconception. [/WARNING]
+[SUMMARY] Provide a brief wrap-up of the core concepts learned. [/SUMMARY]
+[HOMEWORK] Assign a quick practice task or thing to think about. [/HOMEWORK]
 
---- ADAPTIVE PROTOCOL ---
-1. For Math/Physics Concepts & Theorems: 
-   - Expand deeply! Explain the concept, the formula, the variables, and provide a full example application.
-   - IMMEDIATELY generate a [DIAGRAM] tag using a descriptive keyword (e.g., 'right triangle' for Pythagoras).
-   - ALWAYS place formulas inside [MATH] tags, NEVER in [POINT] tags.
-   - Example Structure: 
-     [POINT] The theorem relates the three sides of a right-angled triangle. [/POINT]
-     [EXPLAIN] ... [/EXPLAIN]
-     [POINT] The standard formula is expressed as: [/POINT]
-     [MATH] a^2 + b^2 = c^2 [/MATH]
-     [EXPLAIN] ... [/EXPLAIN]
-2. For Math Sums: Solve strictly step-by-step showing every intermediate calculation using [MATH] tags.
-3. For Coding: Use [CODE] to show syntax, followed by [EXPLAIN].
-4. For General: Use [IMAGE] after the heading, then detailed, continuous [POINT] and [EXPLAIN] pairs.
+--- UNIVERSAL TEACHING ALGORITHM ---
+No matter what subject the user asks for, you MUST adapt and follow this strict interactive flow:
+
+1. VISUAL INTRODUCTION:
+   - Always start with a clear, descriptive [HEADING].
+   - Follow with a relevant [DIAGRAM] or [IMAGE].
+
+2. CORE CONCEPT BREAKDOWN & MANDATORY EQUATIONS:
+   - Teach using a logical sequence of [POINT] and [EXPLAIN] pairs.
+   - For Math/Physics/Science, use [MATH]. Every [MATH] tag MUST be immediately followed by an [EXPLAIN] tag that verbally defines EVERY variable (e.g., "In this formula, F represents force...").
+
+3. INTERACTIVE PAUSE:
+   - After explaining the main concept, you MUST ask the student a question using [QUESTION] followed by an [EXPLAIN] verbalizing the question.
+
+4. CONCLUSION:
+   - Use [WARNING] to clarify common mistakes.
+   - Use [SUMMARY] to recap.
+   - End the lesson with [HOMEWORK].
 """
 
 class TeachRequest(BaseModel):
@@ -129,15 +137,13 @@ async def start_lesson(req: TeachRequest):
 async def interrupt_lesson(req: InterruptRequest):
     system_reminder = TEACH_SYSTEM + f"""
 \nCRITICAL RULES FOR RESUMING:
-1. EXTREMELY SHORT DOUBT RESOLUTION: Explain their specific doubt in 1 or 2 brief sentences maximum using the [EXPLAIN] tag.
-2. EXPLICIT VISUALS/CODE: If the user explicitly asked for a diagram, image, or code, output the respective tag immediately.
-3. RESUME MAIN TOPIC: Immediately after answering the doubt, seamlessly return to the exact point of the main topic you were explaining using the proper tags.
-4. DO NOT write their question on the chalkboard. Keep the board clean.
-5. DO NOT RESTART THE LESSON FROM THE BEGINNING.
+1. EXTREMELY SHORT DOUBT RESOLUTION: Evaluate their answer or explain their specific doubt in 1 or 2 brief sentences using the [EXPLAIN] tag.
+2. RESUME MAIN TOPIC: Immediately after answering the doubt, seamlessly return to the next point of the main topic.
+3. DO NOT write their question on the chalkboard. Keep the board clean.
 """
     messages = req.history + [
         {"role": "system", "content": system_reminder},
-        {"role": "user", "content": f"Student feedback/interruption: {req.question}"}
+        {"role": "user", "content": f"Student response/doubt: {req.question}"}
     ]
     return StreamingResponse(
         stream_groq(messages, system_reminder),
@@ -194,3 +200,12 @@ async def get_history():
             "date": r[4]
         })
     return result
+
+@app.delete("/api/history/{item_id}")
+async def delete_history(item_id: str):
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM history WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
