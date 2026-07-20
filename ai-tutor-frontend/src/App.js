@@ -159,15 +159,9 @@ export default function App() {
   const currentUtteranceRef = useRef(null);
 
   const clearSpeechCompletely = () => {
-    if (window.speechSynthesis) {
-      window.speechSynthesis.resume(); // Fix Chrome getting stuck
-      window.speechSynthesis.cancel();
-      setTimeout(() => {
-        if (window.speechSynthesis) {
-            window.speechSynthesis.resume();
-            window.speechSynthesis.cancel();
-        }
-      }, 50);
+    if (currentUtteranceRef.current instanceof Audio) {
+      currentUtteranceRef.current.pause();
+      currentUtteranceRef.current.src = "";
     }
     setAudioQueue([]);
     setIsPlaying(false);
@@ -176,52 +170,45 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isPaused) return; // Wait until unpaused to start new audio
+    if (isPaused) return; 
 
-    if (!isPlaying && audioQueue.length > 0 && window.speechSynthesis) {
+    if (!isPlaying && audioQueue.length > 0) {
+      const nextItem = audioQueue[0];
+      
+      // Wait for it to be ready from the prefetch
+      if (!nextItem.ready) return; 
+
       setIsPlaying(true);
-      const text = audioQueue[0];
       
-      // Clean text safely without trying to guess/parse complex LaTeX regexes
-      const cleanText = text
-        .replace(/\[.*?\]/g, '') // Remove tags
-        .replace(/[\{\}\\]/g, '') // Strip stray braces or slashes
-        .trim();
-      
-      if (!cleanText) {
+      if (!nextItem.url) {
+        // Fallback if it failed to fetch
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
         return;
       }
 
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      currentUtteranceRef.current = utterance;
-      window._currentUtterance = utterance; // Prevent Chrome garbage collection bug
+      const audio = new Audio(nextItem.url);
+      currentUtteranceRef.current = audio;
       
-      const voices = window.speechSynthesis.getVoices();
-      const voice = voices.find(v => v.name === "Google UK English Female") ||
-                    voices.find(v => v.name === "Microsoft Zira - English (United States)") ||
-                    voices.find(v => v.name === "Samantha") || 
-                    voices.find(v => v.name.toLowerCase().includes("female")) || 
-                    voices[0];
-                    
-      if (voice) utterance.voice = voice;
-      utterance.rate = 0.90; 
-      utterance.pitch = 1.1; 
-      
-      utterance.onend = () => {
+      audio.onended = () => {
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
         currentUtteranceRef.current = null;
+        URL.revokeObjectURL(nextItem.url);
       };
       
-      utterance.onerror = () => {
+      audio.onerror = () => {
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
         currentUtteranceRef.current = null;
+        URL.revokeObjectURL(nextItem.url);
       };
 
-      window.speechSynthesis.speak(utterance);
+      audio.play().catch(e => {
+        console.error("Audio play failed", e);
+        setAudioQueue(prev => prev.slice(1));
+        setIsPlaying(false);
+      });
     }
   }, [audioQueue, isPlaying, isPaused]);
 
@@ -263,20 +250,21 @@ export default function App() {
   }, [blocks.length, isStreaming]);
 
   useEffect(() => {
-    if (window.speechSynthesis) window.speechSynthesis.getVoices();
     return () => {
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
+      if (currentUtteranceRef.current instanceof Audio) {
+        currentUtteranceRef.current.pause();
+      }
     };
   }, []);
 
   const togglePause = () => {
     setIsPaused(prev => {
       const nextPaused = !prev;
-      if (window.speechSynthesis) {
+      if (currentUtteranceRef.current instanceof Audio) {
         if (nextPaused) {
-          window.speechSynthesis.pause();
+          currentUtteranceRef.current.pause();
         } else {
-          window.speechSynthesis.resume();
+          currentUtteranceRef.current.play();
         }
       }
       return nextPaused;
@@ -303,7 +291,26 @@ export default function App() {
           }
 
           if (tag === 'EXPLAIN') {
-            setAudioQueue(q => [...q, content]);
+            const cleanText = content.replace(/\[.*?\]/g, '').replace(/[\{\}\\]/g, '').trim();
+            if (cleanText) {
+              const id = Date.now() + Math.random();
+              setAudioQueue(q => [...q, { id, ready: false, url: null }]);
+              
+              fetch(`${API}/tts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: cleanText })
+              })
+              .then(res => res.blob())
+              .then(blob => {
+                const url = URL.createObjectURL(blob);
+                setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url } : item));
+              })
+              .catch(err => {
+                console.error("Prefetch failed", err);
+                setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url: null } : item));
+              });
+            }
           } else {
             newBlocks.push({ tag, content, id: `block-${endPos}` });
           }

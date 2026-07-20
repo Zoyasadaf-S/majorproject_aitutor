@@ -445,18 +445,12 @@ async def interrupt_lesson(req: InterruptRequest):
     
     system_reminder = base_system + """
 \nCRITICAL RULES FOR RESUMING AFTER AN INTERRUPTION:
-1. CRITICAL: Every interruption response MUST begin with:
-   [EXPLAIN]
-   ...
-   [/EXPLAIN]
-   Never answer using only POINT.
-   Never answer using only IMAGE.
-   Never answer using only MATH.
-   Every answer MUST contain at least one EXPLAIN tag.
-2. Maximum 2 explain blocks.
-3. After answering continue exactly where you stopped.
-4. Never restart the lesson.
-5. Do not write the user's doubt onto the chalkboard.
+1. THE ANSWER: Your response MUST begin with an [EXPLAIN] tag that answers the student's doubt. This answer MUST be extremely short and concise (Maximum 1 short EXPLAIN block).
+2. THE CONTINUATION: Immediately after answering the doubt, you MUST resume teaching the main topic from exactly where you left off. 
+3. IMPORTANT: While the *answer* must be short, the *continuation of the main topic* should be fully detailed, explanatory, and taught normally. Do NOT shorten the main lesson.
+4. DO NOT REPEAT: Look at the previous transcript. Do NOT output any [POINT], [HEADING], or [EXPLAIN] that was already covered. Continue strictly with NEW information.
+5. Never restart the lesson from the beginning.
+6. Do not write the user's doubt onto the chalkboard.
 """
     
     recent_history = req.history[-5:] if len(req.history) > 5 else req.history
@@ -464,7 +458,7 @@ async def interrupt_lesson(req: InterruptRequest):
     messages = recent_history + [
         {
             "role": "user", 
-            "content": f"Current topic: {req.topic}\nStudent asks: {req.question}\nAnswer ONLY this question.\nMaximum 2 explain blocks.\nAfter answering continue exactly where you stopped.\nNever restart the lesson."
+            "content": f"Current topic: {req.topic}\nStudent asks: {req.question}\n\nTask:\n1. Answer this question very briefly.\n2. Then, fully continue teaching the main topic from where you left off, providing full detail."
         }
     ]
     
@@ -525,6 +519,29 @@ async def get_image(q: str):
     return RedirectResponse(
         f"https://placehold.co/900x600/0b2e1b/ffe699?text={urllib.parse.quote(q)}"
     )
+
+import edge_tts
+import uuid
+from fastapi.responses import FileResponse
+
+class TTSRequest(BaseModel):
+    text: str
+
+@app.post("/api/tts")
+async def get_tts(req: TTSRequest):
+    voice = "en-IN-NeerjaNeural"
+    rate = "+25%" # 1.25x speed
+    
+    if not os.path.exists("static"):
+        os.makedirs("static")
+        
+    filename = f"audio_{uuid.uuid4()}.mp3"
+    filepath = os.path.join("static", filename)
+    
+    communicate = edge_tts.Communicate(req.text, voice, rate=rate)
+    await communicate.save(filepath)
+    
+    return FileResponse(filepath)
 
 @app.post("/api/history")
 async def save_history(item: HistoryItem):
