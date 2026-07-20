@@ -41,7 +41,7 @@ init_db()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "llama3-8b-8192"
 UNSPLASH_API_KEY = os.getenv("UNSPLASH_API_KEY")
 
 TEACH_SYSTEM = """
@@ -147,22 +147,14 @@ simple language.
 Do NOT simply repeat the POINT.
 Instead expand it naturally.
 ======================================================
+======================================================
 VISUAL AIDS
 ======================================================
-Before producing any visual aid, ALWAYS think:
+You have two visual tools: [IMAGE] and [DIAGRAM].
 
-Can this concept be DRAWN?
-
-If YES:
-Output a [DIAGRAM] tag.
-
-If NO:
-Output an [IMAGE] tag.
-
-Never output both for the same concept.
-======================================================
-WHEN TO USE DIAGRAM
-======================================================
+WHEN TO USE [DIAGRAM]:
+[DIAGRAM] draws a clean, simple, perfect HTML5 canvas graphic on the whiteboard. 
+You MUST use [DIAGRAM] for physics free body diagrams, simple circuits, math graphs, and basic shapes.
 [DIAGRAM] may ONLY contain ONE of these exact values:
 force_block
 right_triangle
@@ -170,60 +162,12 @@ triangle
 graph
 circle
 circuit
+If the visual concept matches one of those perfectly, use [DIAGRAM]. Do not use [IMAGE].
 
-If the concept cannot be represented by one of these,
-DO NOT use DIAGRAM.
-Use IMAGE instead.
-======================================================
-WHEN TO USE IMAGE
-======================================================
-Use IMAGE only for real-world objects.
-
-Examples
-People
-Animals
-Plants
-Organs
-Cells
-Countries
-Maps
-Machines
-Planets
-Historical monuments
-Historical leaders
-Historical events
-Microscope images
-Laboratory apparatus
-Chemical compounds
-Earth layers
-Solar System
-======================================================
-IMAGE SEARCH RULES
-======================================================
-CRITICAL
-The text inside IMAGE must be the EXACT title that would appear on Wikipedia.
-
-GOOD
-[IMAGE]Human heart[/IMAGE]
-[IMAGE]Animal cell[/IMAGE]
-[IMAGE]Photosynthesis[/IMAGE]
-[IMAGE]Solar System[/IMAGE]
-[IMAGE]Mahatma Gandhi[/IMAGE]
-[IMAGE]World War II[/IMAGE]
-[IMAGE]Mount Everest[/IMAGE]
-[IMAGE]Red Fort[/IMAGE]
-
-BAD
-[IMAGE]heart[/IMAGE]
-[IMAGE]cell[/IMAGE]
-[IMAGE]war[/IMAGE]
-[IMAGE]plant[/IMAGE]
-[IMAGE]mountain[/IMAGE]
-
-Never use ambiguous words.
-Never write full sentences.
-Never exceed THREE words unless it is an official name.
-Always generate the most specific educational keyword possible.
+WHEN TO USE [IMAGE]:
+Use [IMAGE] for anything that cannot be drawn with [DIAGRAM].
+For Biology, Social Science, Chemistry, and General topics, [IMAGE] MUST be the EXACT title that would appear on Wikipedia.
+For Physics, Mathematics, and Computer Science, [IMAGE] MUST be a highly detailed descriptive prompt for an AI image generator.
 ======================================================
 MATHEMATICS
 ======================================================
@@ -239,16 +183,10 @@ Never assume the student knows the variables.
 ======================================================
 PHYSICS
 =====================================================
-If a diagram is required,
-draw it.
-Examples
-Free body diagram
-Projectile
-Circuit
-Wave
-Ray diagram
-Graph
-Vectors
+If a simple visual is required, use [DIAGRAM].
+Examples:
+[DIAGRAM]force_block[/DIAGRAM]
+[DIAGRAM]circuit[/DIAGRAM]
 ======================================================
 PROGRAMMING
 ======================================================
@@ -305,60 +243,29 @@ SPEECH VS MATH RULE (CRITICAL)
 ======================================================
 • The [EXPLAIN] tag is what the AI speaks aloud via Text-to-Speech.
 • NEVER put raw LaTeX (like \frac, ^2, _, etc.) inside [EXPLAIN] tags.
-• When writing about units or formulas inside [EXPLAIN], ALWAYS write them out fully in plain English words (e.g., write "meters per second squared" instead of "m/s^2" or "\frac{m}{s^2}").
+• When writing about SI units, numbers, or formulas inside [EXPLAIN], ALWAYS write them out fully in plain English words (e.g., write "two centimeters per second squared" instead of "2cms-2" or "2 cm/s^2"). NEVER write shorthand units like "kg", "m/s", "cms-2".
 • Keep [MATH] strictly for the chalkboard equation display.
 """
 
 SUBJECT_PROMPTS = {
     "General": TEACH_SYSTEM,
-    "Mathematics": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: MATHEMATICS]\nNever fetch Unsplash images. Heavily prioritize KaTeX [MATH] tags and [DIAGRAM] tags for geometry/graphs. Focus on step-by-step problem solving. Keep topics extremely brief with multiple [POINT] tags.",
-    "Physics": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: PHYSICS]\nPrioritize [DIAGRAM] tags for free body diagrams, circuits, and vectors. Use KaTeX [MATH] for derivations and formulas. Keep topics extremely brief with multiple [POINT] tags.",
+    "Mathematics": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: MATHEMATICS]\nHeavily prioritize KaTeX [MATH] tags. Prioritize [DIAGRAM] for basic shapes (triangle, graph). Focus on step-by-step problem solving. Keep topics extremely brief with multiple [POINT] tags.",
+    "Physics": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: PHYSICS]\nPrioritize [DIAGRAM] tags (force_block, circuit, graph) for free body diagrams, circuits, and vectors. Use KaTeX [MATH] for derivations and formulas. Keep topics extremely brief with multiple [POINT] tags.",
     "Computer Science": TEACH_SYSTEM + """\n\n[SUBJECT OVERRIDE: COMPUTER SCIENCE]
-Use DIAGRAM whenever possible.
-Flowchart
-Binary Tree
-Stack
-Queue
-Linked List
+Use [IMAGE] tags with detailed descriptive prompts for:
+Flowcharts
+Binary Trees
+Stacks & Queues
 Network Topology
-OSI Model
 CPU Architecture
-
-Only use IMAGE for
-Motherboard
-Hard Disk
-CPU Chip
-RAM Module
-Computer Monitor
+Motherboards
 """,
     "Biology": TEACH_SYSTEM + """\n\n[SUBJECT OVERRIDE: BIOLOGY]
 Biology requires educational visuals.
-Always use IMAGE tags for
-Human organs
-Plant organs
-Cells
-Bacteria
-Viruses
-Animals
-Plants
-Body systems
-
-Never use artistic photographs.
-Always generate Wikipedia page titles.
-
-Examples
-Human heart
-Animal cell
-Neuron
-DNA
-Human brain
-Kidney
-Liver
-Photosynthesis
-Cell membrane
-Mitochondrion
+Always use [IMAGE] tags for organs, cells, plants, etc.
+Always generate Wikipedia page titles inside the tag (e.g. [IMAGE]Human heart[/IMAGE]).
 """,
-    "Chemistry": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: CHEMISTRY]\nPrioritize [MATH] for chemical equations. Use [DIAGRAM] for molecular structures and [IMAGE] for laboratory apparatus. Keep topics extremely brief with multiple [POINT] tags.",
+    "Chemistry": TEACH_SYSTEM + "\n\n[SUBJECT OVERRIDE: CHEMISTRY]\nPrioritize [MATH] for chemical equations. Use [IMAGE] with Wikipedia titles for laboratory apparatus and compounds. Keep topics extremely brief with multiple [POINT] tags.",
     "Social Science": TEACH_SYSTEM + """\n\n[SUBJECT OVERRIDE: SOCIAL SCIENCE]
 Always generate Wikipedia titles.
 
@@ -468,8 +375,13 @@ async def interrupt_lesson(req: InterruptRequest):
     )
 
 @app.get("/api/image")
-async def get_image(q: str):
+async def get_image(q: str, subject: str = "General"):
     q = q.strip()
+    
+    if subject in ["Mathematics", "Physics", "Computer Science"]:
+        prompt = urllib.parse.quote(q)
+        return RedirectResponse(f"https://image.pollinations.ai/prompt/{prompt}?width=900&height=600&nologo=true")
+
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             search = await client.get(

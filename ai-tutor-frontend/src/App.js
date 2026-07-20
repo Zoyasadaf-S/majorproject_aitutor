@@ -6,13 +6,11 @@ import { BlockMath } from 'react-katex';
 const API = 'http://127.0.0.1:8000/api';
 
 const VisualImage = ({ query, subject }) => {
-  const source = subject === 'Social Science' ? 'wikipedia' : 'unsplash';
-  
   return (
     <motion.img 
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
-      src={`${API}/image?q=${encodeURIComponent(query)}&source=${source}`} 
+      src={`${API}/image?q=${encodeURIComponent(query)}&subject=${encodeURIComponent(subject)}`} 
       alt="Visual Aid" 
       referrerPolicy="no-referrer" 
       style={{ maxWidth: '100%', maxHeight: '350px', objectFit: 'contain', borderRadius: '8px', marginTop: '10px' }} 
@@ -124,8 +122,11 @@ async function* streamEndpoint(endpoint, body, signal) {
       if (data === '[DONE]') return;
       try {
         const json = JSON.parse(data);
+        if (json.error) throw new Error(json.error);
         if (json.text) yield json.text;
-      } catch {}
+      } catch (e) {
+        if (e.message.includes('API Error')) throw e;
+      }
     }
   }
 }
@@ -342,7 +343,10 @@ export default function App() {
         processRaw(rawBufferRef.current);
       }
     } catch (e) {
-      if (e.name !== 'AbortError') console.error(e);
+      if (e.name !== 'AbortError') {
+        console.error(e);
+        setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+      }
     } finally {
       setIsStreaming(false);
     }
@@ -372,7 +376,10 @@ export default function App() {
         processRaw(rawBufferRef.current);
       }
     } catch (e) {
-      if (e.name !== 'AbortError') console.error(e);
+      if (e.name !== 'AbortError') {
+        console.error(e);
+        setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+      }
     } finally {
       setIsStreaming(false);
     }
