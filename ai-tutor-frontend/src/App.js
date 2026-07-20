@@ -160,9 +160,11 @@ export default function App() {
 
   const clearSpeechCompletely = () => {
     if (window.speechSynthesis) {
+      window.speechSynthesis.resume(); // Fix Chrome getting stuck
       window.speechSynthesis.cancel();
       setTimeout(() => {
         if (window.speechSynthesis) {
+            window.speechSynthesis.resume();
             window.speechSynthesis.cancel();
         }
       }, 50);
@@ -174,22 +176,17 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isPaused) {
-      if (window.speechSynthesis && window.speechSynthesis.speaking) {
-        window.speechSynthesis.pause();
-      }
-      return;
-    } else {
-      if (window.speechSynthesis && window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-        return;
-      }
-    }
+    if (isPaused) return; // Wait until unpaused to start new audio
 
     if (!isPlaying && audioQueue.length > 0 && window.speechSynthesis) {
       setIsPlaying(true);
       const text = audioQueue[0];
-      const cleanText = text.replace(/\[.*?\]/g, '').trim();
+      
+      // Clean text safely without trying to guess/parse complex LaTeX regexes
+      const cleanText = text
+        .replace(/\[.*?\]/g, '') // Remove tags
+        .replace(/[\{\}\\]/g, '') // Strip stray braces or slashes
+        .trim();
       
       if (!cleanText) {
         setAudioQueue(prev => prev.slice(1));
@@ -199,6 +196,7 @@ export default function App() {
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
       currentUtteranceRef.current = utterance;
+      window._currentUtterance = utterance; // Prevent Chrome garbage collection bug
       
       const voices = window.speechSynthesis.getVoices();
       const voice = voices.find(v => v.name === "Google UK English Female") ||
@@ -272,7 +270,17 @@ export default function App() {
   }, []);
 
   const togglePause = () => {
-    setIsPaused(prev => !prev);
+    setIsPaused(prev => {
+      const nextPaused = !prev;
+      if (window.speechSynthesis) {
+        if (nextPaused) {
+          window.speechSynthesis.pause();
+        } else {
+          window.speechSynthesis.resume();
+        }
+      }
+      return nextPaused;
+    });
   };
 
   const processRaw = useCallback((raw) => {
