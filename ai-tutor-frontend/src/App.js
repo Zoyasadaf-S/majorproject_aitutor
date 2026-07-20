@@ -5,49 +5,14 @@ import { BlockMath } from 'react-katex';
 
 const API = 'http://127.0.0.1:8000/api';
 
-const resetVoiceEngine = () => {
-  if (window.speechSynthesis) {
-    window.speechSynthesis.resume();
-    window.speechSynthesis.cancel();
-  }
-};
-
-const WikipediaImage = ({ query }) => {
-  const [imgUrl, setImgUrl] = useState('');
-  
-  useEffect(() => {
-    const fetchImage = async () => {
-      try {
-        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&prop=pageimages&piprop=original|thumbnail&pithumbsize=600&format=json&origin=*`;
-        const res = await fetch(searchUrl);
-        const data = await res.json();
-        const pages = data.query?.pages;
-        
-        if (pages) {
-          const page = Object.values(pages)[0];
-          if (page.original && page.original.source) {
-            setImgUrl(page.original.source);
-            return;
-          } else if (page.thumbnail && page.thumbnail.source) {
-            setImgUrl(page.thumbnail.source);
-            return;
-          }
-        }
-      } catch (e) {
-        console.error("Image fetch failed", e);
-      }
-      setImgUrl(`https://placehold.co/600x350/0b2e1b/ffe699?text=${encodeURIComponent(query)}`);
-    };
-    fetchImage();
-  }, [query]);
-
-  if (!imgUrl) return <div style={{ color: '#a1a1aa', fontStyle: 'italic', padding: '20px', textAlign: 'center' }}>Loading visual...</div>;
+const VisualImage = ({ query, subject }) => {
+  const source = subject === 'Social Science' ? 'wikipedia' : 'unsplash';
   
   return (
     <motion.img 
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
-      src={imgUrl} 
+      src={`${API}/image?q=${encodeURIComponent(query)}&source=${source}`} 
       alt="Visual Aid" 
       referrerPolicy="no-referrer" 
       style={{ maxWidth: '100%', maxHeight: '350px', objectFit: 'contain', borderRadius: '8px', marginTop: '10px' }} 
@@ -70,34 +35,41 @@ const CanvasDiagram = ({ instructions }) => {
     ctx.font = '18px "Caveat", cursive';
 
     ctx.beginPath();
-    const inst = instructions.toLowerCase();
     
-    if (inst.includes('right triangle')) {
+    let type = '';
+    try {
+        const parsed = JSON.parse(instructions);
+        type = parsed.type;
+    } catch (e) {
+        type = instructions.toLowerCase().trim();
+    }
+    
+    if (type === 'right_triangle') {
         ctx.moveTo(150, 50); ctx.lineTo(150, 250); ctx.lineTo(350, 250); ctx.closePath();
         ctx.fillText("A", 140, 40); ctx.fillText("B", 130, 260); ctx.fillText("C", 360, 260);
         ctx.strokeRect(150, 230, 20, 20); 
     } 
-    else if (inst.includes('triangle')) {
+    else if (type === 'triangle') {
         ctx.moveTo(250, 40); ctx.lineTo(100, 240); ctx.lineTo(400, 240); ctx.closePath();
         ctx.fillText("A", 240, 30); ctx.fillText("B", 80, 260); ctx.fillText("C", 410, 260);
     } 
-    else if (inst.includes('circuit')) {
+    else if (type === 'circuit') {
         ctx.strokeRect(100, 80, 300, 140);
         ctx.clearRect(230, 75, 40, 10); ctx.fillText("┠┨ V", 225, 70);
         ctx.clearRect(230, 215, 40, 10); ctx.strokeRect(230, 210, 40, 10); ctx.fillText("R", 245, 245);
     } 
-    else if (inst.includes('graph') || inst.includes('parabola') || inst.includes('plot')) {
+    else if (type === 'graph' || type === 'parabola' || type === 'plot') {
         ctx.moveTo(50, 250); ctx.lineTo(450, 250); 
         ctx.moveTo(250, 30); ctx.lineTo(250, 270);
         ctx.moveTo(100, 50); ctx.quadraticCurveTo(250, 350, 400, 50);
         ctx.fillText("y", 260, 40); ctx.fillText("x", 440, 270);
     } 
-    else if (inst.includes('circle')) {
+    else if (type === 'circle') {
         ctx.arc(250, 150, 100, 0, 2 * Math.PI);
         ctx.fillText("r", 255, 145);
         ctx.moveTo(250, 150); ctx.lineTo(350, 150);
     } 
-    else if (inst.includes('force') || inst.includes('block')) {
+    else if (type === 'force_block') {
         ctx.moveTo(100, 250); ctx.lineTo(400, 250);
         ctx.strokeRect(200, 150, 100, 100);
         ctx.fillText("Mass", 230, 205);
@@ -167,6 +139,9 @@ export default function App() {
 
   const [started, setStarted] = useState(false);
   const [topic, setTopic] = useState('');
+  const [subject, setSubject] = useState('General');
+  const availableSubjects = ['General', 'Mathematics', 'Physics', 'Biology', 'Computer Science', 'Chemistry', 'Social Science'];
+  
   const [blocks, setBlocks] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [interruption, setInterruption] = useState('');
@@ -181,9 +156,37 @@ export default function App() {
   const scrollRef = useRef(null);
   const lessonContextRef = useRef(''); 
   const abortControllerRef = useRef(null);
+  const currentUtteranceRef = useRef(null);
+
+  const clearSpeechCompletely = () => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+      setTimeout(() => {
+        if (window.speechSynthesis) {
+            window.speechSynthesis.cancel();
+        }
+      }, 50);
+    }
+    setAudioQueue([]);
+    setIsPlaying(false);
+    setIsPaused(false);
+    currentUtteranceRef.current = null;
+  };
 
   useEffect(() => {
-    if (!isPlaying && audioQueue.length > 0 && !isPaused && window.speechSynthesis) {
+    if (isPaused) {
+      if (window.speechSynthesis && window.speechSynthesis.speaking) {
+        window.speechSynthesis.pause();
+      }
+      return;
+    } else {
+      if (window.speechSynthesis && window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+        return;
+      }
+    }
+
+    if (!isPlaying && audioQueue.length > 0 && window.speechSynthesis) {
       setIsPlaying(true);
       const text = audioQueue[0];
       const cleanText = text.replace(/\[.*?\]/g, '').trim();
@@ -195,6 +198,8 @@ export default function App() {
       }
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
+      currentUtteranceRef.current = utterance;
+      
       const voices = window.speechSynthesis.getVoices();
       const voice = voices.find(v => v.name === "Google UK English Female") ||
                     voices.find(v => v.name === "Microsoft Zira - English (United States)") ||
@@ -209,11 +214,13 @@ export default function App() {
       utterance.onend = () => {
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
+        currentUtteranceRef.current = null;
       };
       
       utterance.onerror = () => {
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
+        currentUtteranceRef.current = null;
       };
 
       window.speechSynthesis.speak(utterance);
@@ -259,17 +266,13 @@ export default function App() {
 
   useEffect(() => {
     if (window.speechSynthesis) window.speechSynthesis.getVoices();
+    return () => {
+      if (window.speechSynthesis) window.speechSynthesis.cancel();
+    };
   }, []);
 
   const togglePause = () => {
-    if (!window.speechSynthesis) return;
-    if (isPaused) {
-      window.speechSynthesis.resume();
-      setIsPaused(false);
-    } else {
-      window.speechSynthesis.pause();
-      setIsPaused(true);
-    }
+    setIsPaused(prev => !prev);
   };
 
   const processRaw = useCallback((raw) => {
@@ -307,21 +310,19 @@ export default function App() {
     if (abortControllerRef.current) abortControllerRef.current.abort();
     abortControllerRef.current = new AbortController();
 
+    clearSpeechCompletely();
     setStarted(true);
     setViewPastClass(null);
     setIsStreaming(true);
     setIsPaused(false);
     setQuestionsAsked([]);
-    setAudioQueue([]);
-    setIsPlaying(false);
     rawBufferRef.current = '';
     processedUpToRef.current = 0;
     lessonContextRef.current = ''; 
     setBlocks([]);
-    resetVoiceEngine();
 
     try {
-      for await (const chunk of streamEndpoint('teach', { topic }, abortControllerRef.current.signal)) {
+      for await (const chunk of streamEndpoint('teach', { topic, subject }, abortControllerRef.current.signal)) {
         rawBufferRef.current += chunk;
         processRaw(rawBufferRef.current);
       }
@@ -342,9 +343,8 @@ export default function App() {
     const question = interruption;
     setQuestionsAsked(prev => [...prev, question]);
     setInterruption('');
-    setAudioQueue([]);
-    setIsPlaying(false);
-    resetVoiceEngine(); 
+    
+    clearSpeechCompletely();
     
     const history = [
       { role: "user", content: `Teach me about: ${topic}` },
@@ -352,7 +352,7 @@ export default function App() {
     ];
 
     try {
-      for await (const chunk of streamEndpoint('interrupt', { topic, history, question }, abortControllerRef.current.signal)) {
+      for await (const chunk of streamEndpoint('interrupt', { topic, history, question, subject }, abortControllerRef.current.signal)) {
         rawBufferRef.current += chunk;
         processRaw(rawBufferRef.current);
       }
@@ -365,7 +365,7 @@ export default function App() {
 
   const exitToLanding = async () => {
     if (abortControllerRef.current) abortControllerRef.current.abort();
-    resetVoiceEngine();
+    clearSpeechCompletely();
     
     if (topic && blocks.length > 0) {
       const newClass = {
@@ -394,8 +394,6 @@ export default function App() {
     setBlocks([]);
     setInterruption('');
     setQuestionsAsked([]);
-    setAudioQueue([]);
-    setIsPlaying(false);
     rawBufferRef.current = '';
     processedUpToRef.current = 0;
     lessonContextRef.current = ''; 
@@ -405,6 +403,7 @@ export default function App() {
     if (started) {
       exitToLanding();
     }
+    clearSpeechCompletely();
     setViewPastClass(null);
     setIsAuthenticated(false);
   };
@@ -472,7 +471,7 @@ export default function App() {
       );
       case 'IMAGE': return (
         <div className="rendered-media-frame">
-          <WikipediaImage query={step.content} />
+          <VisualImage query={step.content} subject={subject} />
         </div>
       );
       case 'DIAGRAM': return <CanvasDiagram instructions={step.content} />;
@@ -512,7 +511,7 @@ export default function App() {
               <div className="sidebar-top-section">
                 <div className="brand-title">
                   Cogni-Learn <span role="img" aria-label="graduation cap">🎓</span>
-                  <button className="exit-action-btn" onClick={() => setViewPastClass(null)}>QUIT</button>
+                  <button className="exit-action-btn" onClick={() => { clearSpeechCompletely(); setViewPastClass(null); }}>QUIT</button>
                 </div>
 
                 <div className="status-meta-card">
@@ -576,18 +575,29 @@ export default function App() {
 
             <div className="classroom-main-board" style={{display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
               <div className="landing-card">
-                <h1 className="main-title">Start a New Class 🎓</h1>
-                <p className="main-subtitle">Enter any complex topic, math formula, or coding framework to begin your live session.</p>
-                <div className="topic-input-wrapper">
-                  <input 
-                    value={topic} 
-                    onChange={e => setTopic(e.target.value)} 
-                    placeholder="What topic would you like to master today?" 
-                    onKeyPress={e => e.key === 'Enter' && startSession()}
-                    autoFocus
-                  />
-                  <button onClick={startSession} disabled={!topic}>Teach Me</button>
-                </div>
+                  <h1 className="main-title">Start a New Class 🎓</h1>
+                  <p className="main-subtitle">Select a subject and enter any complex topic, math formula, or coding concept to begin your live session.</p>
+                  
+                  <select 
+                      className="subject-dropdown" 
+                      value={subject} 
+                      onChange={(e) => setSubject(e.target.value)}
+                  >
+                      {availableSubjects.map(sub => (
+                          <option key={sub} value={sub}>{sub}</option>
+                      ))}
+                  </select>
+
+                  <div className="topic-input-wrapper" style={{ marginTop: '15px' }}>
+                      <input 
+                          value={topic} 
+                          onChange={e => setTopic(e.target.value)} 
+                          placeholder="What topic would you like to master today?" 
+                          onKeyPress={e => e.key === 'Enter' && startSession()}
+                          autoFocus
+                      />
+                      <button onClick={startSession} disabled={!topic}>Teach Me</button>
+                  </div>
               </div>
             </div>
           </>
