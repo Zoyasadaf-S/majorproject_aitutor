@@ -629,16 +629,6 @@ body, html, #root {
   border-radius: 0 8px 8px 0;
 }
 
-.rendered-homework {
-  background-color: rgba(221, 160, 221, 0.1);
-  border-left: 4px solid #dda0dd;
-  padding: 15px;
-  color: #f3e8ff;
-  font-size: 1.2rem;
-  margin: 15px 0;
-  border-radius: 0 8px 8px 0;
-}
-
 @media (max-width: 900px) {
   .app-workspace {
     flex-direction: column;
