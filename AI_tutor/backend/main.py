@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from passlib.context import CryptContext
 import jwt
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -227,10 +228,9 @@ CRITICAL RULE FOR ALL SUBJECTS (NON-STEM, GEOGRAPHY, GENERAL, HISTORY, ETC.):
 • NEVER output only a [HEADING] tag.
 • NEVER output only an [IMAGE] or [DIAGRAM] without accompanying text explanations.
 • Images and diagrams are SUPPORTING MATERIAL ONLY — they must NEVER replace text explanations.
-• Every response for EVERY subject MUST contain a complete explanation payload:
-  1. A focused [HEADING] when it helps organize the answer.
-  2. The number of [POINT] tags needed to answer the actual question, usually 1–4.
-  3. A clear [EXPLAIN] block when an explanation is needed; do not pad a direct answer.
+• Every response for EVERY subject MUST contain a complete explanation payload.
+• For a normal broad lesson, build about 5–8 meaningful teaching sections. Scale down to 2–4 for a narrow question or a user-requested short answer; never pad a direct answer.
+• Give each useful section a clear [HEADING] or focused [POINT], supporting details or an example where it helps, and an immediately following [EXPLAIN] that teaches those exact board items.
 • Treat [HEADING], [POINT], [MATH], [CODE], [DIAGRAM], [IMAGE], [WARNING], [QUESTION], and [SUMMARY] as concise board content. Treat [EXPLAIN] as detailed spoken narration only; never repeat a full explanation in board tags.
 
 ======================================================
@@ -273,6 +273,8 @@ TEACHING STYLE
 4. Give a real-world example or analogy.
 5. Show a diagram or image ONLY if it directly matches the topic and adds genuine educational value.
 6. Continue.
+
+For broad lessons, use the 5–8 section target above and cover distinct parts of the topic rather than repeating the same idea. When a supported canvas diagram or a specific retrievable reference image would materially clarify one section, emit its [DIAGRAM] or [IMAGE] tag immediately before that section's [EXPLAIN]. Keep all source-based lessons grounded in the supplied source.
 
 Never explain too many ideas at once.
 If the topic is large, split into mini-lessons.
@@ -945,7 +947,7 @@ async def upload_image(
     if ext not in allowed_exts:
         raise HTTPException(
             status_code=400,
-            detail="Unsupported image format. Please upload a PNG, JPG, or WEBP image."
+            detail="Unsupported image format. Please upload a PNG, JPG, JPEG, WEBP, BMP, or GIF image."
         )
         
     content = await file.read(15 * 1024 * 1024 + 1)
@@ -1077,7 +1079,7 @@ The student uploaded an educational image '{img_data['filename']}'.
 Extracted Text/Content from Image:
 {extracted}
 
-Ground your lesson directly in the image content and answer the student's question accurately.
+OCR labels include approximate positions within the image. Use those positions to describe visible grouping and sequence, and ground the lesson in the extracted content. Do not invent arrows, connections, or labels that OCR did not capture; clearly state when the image alone does not establish a relationship.
 """
                 system_prompt = TEACH_SYSTEM + "\n" + source_instruction
                 messages = [{"role": "user", "content": f"Explain this image in detail. My question: {topic_str}{subject_hint}"}]
@@ -1105,6 +1107,7 @@ Extracted Text/Content from Image:
 INSTRUCTIONS FOR TEACHER:
 1. Emit [LANG] tag as the very first token.
 2. Teach the student step-by-step about the concepts, formulas, or problems shown in this image.
+3. Use the OCR labels and their approximate positions to describe visible grouping and sequence. Do not invent unreadable labels or diagram connections.
 """
                 system_prompt = TEACH_SYSTEM + "\n" + source_instruction
                 messages = [{"role": "user", "content": f"Explain the key concepts shown in my uploaded image '{img_data['filename']}'."}]
@@ -1215,7 +1218,10 @@ async def get_image(q: str):
     if not q:
         return JSONResponse({"url": None, "source": None, "attribution": None, "license": None})
 
-    async with httpx.AsyncClient(timeout=12.0) as client:
+    async with httpx.AsyncClient(
+        timeout=12.0,
+        headers={"User-Agent": "CogniLearn/1.0 (educational image lookup)"},
+    ) as client:
 
         # ── 1. Wikimedia Commons — search ────────────────────────────────────
         try:
@@ -1315,6 +1321,48 @@ async def get_image(q: str):
         except Exception as e:
             print(f"[image] Wikipedia search error: {e}")
 
+        # ── 3b. Wikipedia REST search + exact-page thumbnail ─────────────────
+        # The legacy generator=search API can be denied by Wikimedia edge
+        # policies. REST search returns relevant article titles; resolve each
+        # title through pageimages to get a larger, directly loadable thumbnail.
+        try:
+            rest_search = await client.get(
+                "https://api.wikimedia.org/core/v1/wikipedia/en/search/page",
+                params={"q": q, "limit": "5"},
+            )
+            if rest_search.status_code == 200:
+                for result in rest_search.json().get("pages", []):
+                    title = result.get("title", "")
+                    excerpt = re.sub(r"<[^>]+>", "", result.get("excerpt", ""))
+                    if not result.get("thumbnail") or not image_matches_query(q, title, excerpt):
+                        continue
+
+                    page_image_resp = await client.get(
+                        "https://en.wikipedia.org/w/api.php",
+                        params={
+                            "action": "query",
+                            "titles": title,
+                            "prop": "pageimages|info",
+                            "inprop": "url",
+                            "pithumbsize": 900,
+                            "format": "json",
+                        },
+                    )
+                    if page_image_resp.status_code != 200:
+                        continue
+                    page = next(iter(page_image_resp.json().get("query", {}).get("pages", {}).values()), {})
+                    thumb_url = page.get("thumbnail", {}).get("source")
+                    if not thumb_url or not image_matches_query(q, title, excerpt):
+                        continue
+                    return JSONResponse({
+                        "url": thumb_url,
+                        "source": "Wikipedia",
+                        "attribution": f"Wikipedia — {page.get('title', title)}",
+                        "license": "See the source page for image licensing",
+                    })
+        except Exception as e:
+            logger.warning("Wikipedia REST image search failed for query %r: %s", q, e)
+
         # ── 4. Unsplash ───────────────────────────────────────────────────────
         if UNSPLASH_API_KEY:
             try:
@@ -1360,7 +1408,11 @@ async def get_tts(req: TTSRequest):
     try:
         communicate = edge_tts.Communicate(req.text, voice, rate=rate)
         await communicate.save(filepath)
-        return FileResponse(filepath, media_type="audio/mpeg")
+        return FileResponse(
+            filepath,
+            media_type="audio/mpeg",
+            background=BackgroundTask(os.remove, filepath),
+        )
     except Exception as e:
         print(f"[tts] Error with voice {voice}: {e}")
         # Try fallback English voice
@@ -1368,7 +1420,11 @@ async def get_tts(req: TTSRequest):
             fallback_voice = "en-IN-NeerjaNeural"
             communicate = edge_tts.Communicate(req.text, fallback_voice, rate=rate)
             await communicate.save(filepath)
-            return FileResponse(filepath, media_type="audio/mpeg")
+            return FileResponse(
+                filepath,
+                media_type="audio/mpeg",
+                background=BackgroundTask(os.remove, filepath),
+            )
         except Exception as e2:
             print(f"[tts] Fallback also failed: {e2}")
             return JSONResponse({"error": "TTS unavailable"}, status_code=500)

@@ -6,15 +6,18 @@ import hashlib
 import sqlite3
 import uuid
 import logging
+import sys
 
 # PDF, DOCX, PPTX libraries
+_PYMUPDF_IMPORT_ERROR = None
 try:
     import pymupdf as fitz
 except ImportError:
     try:
         import fitz
-    except ImportError:
+    except ImportError as exc:
         fitz = None
+        _PYMUPDF_IMPORT_ERROR = exc
 
 try:
     import docx
@@ -59,7 +62,7 @@ def extract_text_from_image(image_bytes: bytes) -> str:
     try:
         with Image.open(io.BytesIO(image_bytes)) as image:
             if image.format not in {"PNG", "JPEG", "WEBP", "BMP", "GIF"}:
-                raise ValueError("Unsupported image format. Please upload a PNG, JPG, or JPEG image.")
+                raise ValueError("Unsupported image format. Please upload a PNG, JPG, JPEG, WEBP, BMP, or GIF image.")
             if image.width * image.height > 40_000_000:
                 raise ValueError("This image is too large to process. Please upload a smaller image.")
             image_size = image.size
@@ -87,7 +90,6 @@ def extract_text_from_image(image_bytes: bytes) -> str:
             
     try:
         import pytesseract
-        from PIL import Image
         img = Image.open(io.BytesIO(image_bytes))
         ocr_text = pytesseract.image_to_string(img).strip()
         if ocr_text:
@@ -119,7 +121,15 @@ def extract_text_from_pdf(file_bytes: bytes):
     """Extract text page by page, using the shared OCR reader for scanned pages."""
     pages_data = []
     if not fitz:
-        raise ValueError("PyMuPDF is not installed")
+        logger.error(
+            "PDF extraction is unavailable in Python %s: PyMuPDF import failed: %s",
+            sys.executable,
+            _PYMUPDF_IMPORT_ERROR,
+        )
+        raise ValueError(
+            "PDF processing is unavailable in the Python environment running the backend. "
+            "Install the backend dependencies from AI_tutor/backend/requirements.txt and restart the server."
+        ) from _PYMUPDF_IMPORT_ERROR
     
     try:
         doc = fitz.open(stream=file_bytes, filetype="pdf")

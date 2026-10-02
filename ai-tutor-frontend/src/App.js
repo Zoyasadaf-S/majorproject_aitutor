@@ -13,34 +13,55 @@ const API = 'http://127.0.0.1:8000/api';
 // Shows attribution beneath the image. Renders nothing if no image found.
 const VisualImage = ({ query }) => {
   const [imgData, setImgData] = React.useState(null);
-  const [loaded, setLoaded] = React.useState(false);
+  const [imageStatus, setImageStatus] = React.useState('loading');
 
   React.useEffect(() => {
-    if (!query) return;
+    let active = true;
+    setImgData(null);
+    setImageStatus('loading');
+    if (!query) {
+      setImageStatus('missing');
+      return () => { active = false; };
+    }
     fetch(`${API}/image?q=${encodeURIComponent(query)}`)
-      .then(r => r.json())
-      .then(data => setImgData(data))
-      .catch(() => setImgData(null));
+      .then(r => {
+        if (!r.ok) throw new Error(`Image lookup failed (${r.status})`);
+        return r.json();
+      })
+      .then(data => {
+        if (!active) return;
+        if (data?.url) setImgData(data);
+        else setImageStatus('missing');
+      })
+      .catch(() => {
+        if (active) setImageStatus('missing');
+      });
+    return () => { active = false; };
   }, [query]);
 
-  if (!imgData || !imgData.url) return null;
+  if (imageStatus === 'missing') {
+    return <div className="visual-unavailable" role="status">No matching image could be loaded; the lesson continues on the board.</div>;
+  }
+  if (!imgData?.url) {
+    return <div className="visual-loading" role="status">Finding a relevant teaching image…</div>;
+  }
 
   return (
     <div style={{ margin: '12px 0' }}>
       <motion.img
         initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: loaded ? 1 : 0, scale: loaded ? 1 : 0.95 }}
+        animate={{ opacity: imageStatus === 'loaded' ? 1 : 0, scale: imageStatus === 'loaded' ? 1 : 0.95 }}
         src={imgData.url}
         alt={query}
         referrerPolicy="no-referrer"
-        onLoad={() => setLoaded(true)}
-        onError={() => setImgData(null)}
+        onLoad={() => setImageStatus('loaded')}
+        onError={() => { setImgData(null); setImageStatus('missing'); }}
         style={{
           maxWidth: '100%', maxHeight: '350px', objectFit: 'contain',
           borderRadius: '8px', display: 'block'
         }}
       />
-      {loaded && (imgData.attribution || imgData.source) && (
+      {imageStatus === 'loaded' && (imgData.attribution || imgData.source) && (
         <div style={{
           fontSize: '11px', color: 'rgba(255,230,153,0.55)', marginTop: '5px',
           fontStyle: 'italic', lineHeight: '1.4'
@@ -296,7 +317,8 @@ async function* streamEndpoint(endpoint, body, signal) {
   }
 
   if (!resp.ok) {
-    throw new Error(`Server returned HTTP ${resp.status}`);
+    const failure = await resp.json().catch(() => ({}));
+    throw new Error(failure.detail || `The server could not process this request (HTTP ${resp.status}).`);
   }
 
   const reader = resp.body.getReader();
@@ -384,12 +406,16 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState('');
   const [audioError, setAudioError] = useState('');
+  const [audioNeedsUserGesture, setAudioNeedsUserGesture] = useState(false);
   const [interruption, setInterruption] = useState('');
   const [isPaused, setIsPaused] = useState(false);
   const [questionsAsked, setQuestionsAsked] = useState([]);
   
   const [audioQueue, setAudioQueue] = useState([]);
   const [isPlaying, setIsPlaying] = useState(false);
+  const audioQueueRef = useRef(audioQueue);
+  const ttsGenerationQueueRef = useRef(Promise.resolve());
+  const ttsAbortControllersRef = useRef(new Set());
 
   const rawBufferRef = useRef('');
   const processedUpToRef = useRef(0);
@@ -398,6 +424,10 @@ export default function App() {
   const abortControllerRef = useRef(null);
   const currentUtteranceRef = useRef(null);
   const currentStreamIdRef = useRef(0);
+
+  useEffect(() => {
+    audioQueueRef.current = audioQueue;
+  }, [audioQueue]);
 
   // Validate existing token on mount
   useEffect(() => {
@@ -423,6 +453,8 @@ export default function App() {
   }, []);
 
   const clearSpeechCompletely = () => {
+    ttsAbortControllersRef.current.forEach(controller => controller.abort());
+    ttsAbortControllersRef.current.clear();
     if (currentUtteranceRef.current instanceof Audio) {
       currentUtteranceRef.current.pause();
       currentUtteranceRef.current.currentTime = 0;
@@ -436,6 +468,7 @@ export default function App() {
     });
     setIsPlaying(false);
     setIsPaused(false);
+    setAudioNeedsUserGesture(false);
     currentUtteranceRef.current = null;
   };
 
@@ -457,53 +490,62 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (isPaused) return; 
+    if (isPaused || audioNeedsUserGesture) return;
 
     if (!isPlaying && audioQueue.length > 0) {
       const nextItem = audioQueue[0];
       
       if (nextItem.streamId && nextItem.streamId !== currentStreamIdRef.current) {
         if (nextItem.url) URL.revokeObjectURL(nextItem.url);
-        setAudioQueue(prev => prev.slice(1));
+        setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
         return;
       }
 
       if (!nextItem.ready) return; 
 
-      setIsPlaying(true);
-      
       if (!nextItem.url) {
-        setAudioQueue(prev => prev.slice(1));
-        setIsPlaying(false);
+        setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
         return;
       }
 
       const audio = new Audio(nextItem.url);
       currentUtteranceRef.current = audio;
-      
-      audio.onended = () => {
-        setAudioQueue(prev => prev.slice(1));
+
+      const releaseCurrentAudio = (errorMessage = '') => {
+        if (errorMessage) setAudioError(errorMessage);
+        setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
         setIsPlaying(false);
-        currentUtteranceRef.current = null;
-        URL.revokeObjectURL(nextItem.url);
-      };
-      
-      audio.onerror = () => {
-        setAudioError('Audio playback failed. You can continue reading the lesson.');
-        setAudioQueue(prev => prev.slice(1));
-        setIsPlaying(false);
-        currentUtteranceRef.current = null;
+        if (currentUtteranceRef.current === audio) currentUtteranceRef.current = null;
+        audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
         URL.revokeObjectURL(nextItem.url);
       };
 
-      audio.play().catch(e => {
+      audio.onended = () => {
+        setAudioError('');
+        releaseCurrentAudio();
+      };
+      
+      audio.onerror = () => {
+        releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
+      };
+
+      audio.play().then(() => {
+        setAudioError('');
+        setIsPlaying(true);
+      }).catch(e => {
         console.error("Audio play failed", e);
-        setAudioError('Audio playback failed. You can continue reading the lesson.');
-        setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
+        if (e.name === 'NotAllowedError') {
+          setAudioNeedsUserGesture(true);
+          setAudioError('Select Play Voice to start the lesson narration.');
+          return;
+        }
+        releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
       });
     }
-  }, [audioQueue, isPlaying, isPaused]);
+  }, [audioQueue, isPlaying, isPaused, audioNeedsUserGesture]);
 
   const fetchHistory = async () => {
     const token = localStorage.getItem('cognilearn_token');
@@ -576,12 +618,50 @@ export default function App() {
   }, [blocks.length, isStreaming]);
 
   useEffect(() => {
+    const ttsControllers = ttsAbortControllersRef.current;
     return () => {
+      abortControllerRef.current?.abort();
       if (currentUtteranceRef.current instanceof Audio) {
         currentUtteranceRef.current.pause();
+        currentUtteranceRef.current.removeAttribute('src');
       }
+      audioQueueRef.current.forEach(item => {
+        if (item.url) URL.revokeObjectURL(item.url);
+      });
+      ttsControllers.forEach(controller => controller.abort());
     };
   }, []);
+
+  useEffect(() => {
+    const previewUrl = selectedImage?.previewUrl;
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [selectedImage?.previewUrl]);
+
+  const playBlockedAudio = () => {
+    const audio = currentUtteranceRef.current;
+    if (!(audio instanceof Audio)) {
+      setAudioNeedsUserGesture(false);
+      setIsPaused(false);
+      return;
+    }
+    setAudioError('');
+    setIsPaused(false);
+    audio.play().then(() => {
+      setAudioNeedsUserGesture(false);
+      setIsPlaying(true);
+    }).catch(error => {
+      console.error('Narration could not be resumed', error);
+      setIsPlaying(false);
+      if (error.name === 'NotAllowedError') {
+        setAudioNeedsUserGesture(true);
+        setAudioError('Narration is still blocked by the browser. Use Play Voice after interacting with the page.');
+      } else {
+        setAudioError('Audio playback failed. You can continue reading the lesson.');
+      }
+    });
+  };
 
   const togglePause = () => {
     setIsPaused(prev => {
@@ -592,7 +672,13 @@ export default function App() {
         } else {
           currentUtteranceRef.current.play().catch(e => {
             console.error("Resume audio play failed", e);
-            setAudioError('Audio playback failed. You can continue reading the lesson.');
+            if (e.name === 'NotAllowedError') {
+              setAudioNeedsUserGesture(true);
+              setIsPlaying(false);
+              setAudioError('Select Play Voice to resume the lesson narration.');
+            } else {
+              setAudioError('Audio playback failed. You can continue reading the lesson.');
+            }
           });
         }
       }
@@ -734,33 +820,37 @@ export default function App() {
       const langForTts = detectedLanguageRef.current || 'en';
       newTtsItems.forEach(({ id, cleanText }) => {
         setAudioQueue(q => [...q, { id, streamId, ready: false, url: null }]);
+        ttsGenerationQueueRef.current = ttsGenerationQueueRef.current.then(async () => {
+          if (streamId !== currentStreamIdRef.current) return;
+          const controller = new AbortController();
+          ttsAbortControllersRef.current.add(controller);
+          try {
+            const response = await fetch(`${API}/tts`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: cleanText, language: langForTts }),
+              signal: controller.signal
+            });
+            if (!response.ok) throw new Error(`TTS request failed (${response.status})`);
+            const blob = await response.blob();
+            if (!blob.size) throw new Error('TTS returned an empty audio file');
+            if (streamId !== currentStreamIdRef.current) return;
 
-        fetch(`${API}/tts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: cleanText, language: langForTts })
-        })
-        .then(res => {
-          if (streamId !== currentStreamIdRef.current) return null;
-          if (!res.ok) throw new Error(`TTS request failed (${res.status})`);
-          return res.blob();
-        })
-        .then(blob => {
-          if (!blob || streamId !== currentStreamIdRef.current) return;
-          const url = URL.createObjectURL(blob);
-          setAudioQueue(q => {
-            if (streamId !== currentStreamIdRef.current) {
-              URL.revokeObjectURL(url);
-              return q;
-            }
-            return q.map(item => item.id === id ? { ...item, ready: true, url } : item);
-          });
-        })
-        .catch(err => {
-          console.error('TTS fetch failed', err);
-          if (streamId === currentStreamIdRef.current) {
+            const url = URL.createObjectURL(blob);
+            setAudioQueue(q => {
+              if (streamId !== currentStreamIdRef.current || !q.some(item => item.id === id)) {
+                URL.revokeObjectURL(url);
+                return q;
+              }
+              return q.map(item => item.id === id ? { ...item, ready: true, url } : item);
+            });
+          } catch (err) {
+            if (err.name === 'AbortError' || streamId !== currentStreamIdRef.current) return;
+            console.error('TTS fetch failed', err);
             setAudioError('Audio generation failed. You can continue reading the lesson.');
             setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url: null } : item));
+          } finally {
+            ttsAbortControllersRef.current.delete(controller);
           }
         });
       });
@@ -785,7 +875,7 @@ export default function App() {
         },
         body: formData
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.document_id) {
         setSelectedFile({ name: file.name, documentId: data.document_id });
         setSelectedImage(null);
@@ -818,9 +908,9 @@ export default function App() {
         },
         body: formData
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.image_id) {
-        setSelectedImage({ name: file.name, imageId: data.image_id });
+        setSelectedImage({ name: file.name, imageId: data.image_id, previewUrl: URL.createObjectURL(file) });
         setSelectedFile(null);
       } else {
         setUploadError(data.detail || 'Failed to upload image');
@@ -1250,6 +1340,9 @@ export default function App() {
     // Final-defence sanitiser: strip any leftover tag text that
     // somehow survived the processRaw pass before it hits the DOM.
     const safe = (str) => stripAllTags(str);
+    const safeMultiline = (str) => typeof str === 'string'
+      ? str.replace(/\[\/?\s*[A-Z1-9_-]{2,20}\s*\]/gi, '').trim()
+      : '';
 
     switch(step.tag) {
       case 'HEADING': return <h1 className="rendered-heading">{safe(step.content)}</h1>;
@@ -1260,7 +1353,7 @@ export default function App() {
         </div>
       );
       case 'EXPLAIN': return includeExplanation
-        ? <div className="recorded-explanation"><strong>Explanation</strong><div>{safe(step.content)}</div></div>
+        ? <div className="recorded-explanation"><strong>Explanation</strong><div>{safeMultiline(step.content)}</div></div>
         : null;
       case 'MATH': {
         try {
@@ -1504,7 +1597,7 @@ export default function App() {
                     type="file"
                     ref={fileInputRef}
                     onChange={handleFileUpload}
-                    accept=".pdf,.docx,.doc,.pptx,.ppt,.txt,.md"
+                    accept=".pdf,.docx,.pptx,.txt,.md"
                     style={{ display: 'none' }}
                   />
                   <input
@@ -1682,8 +1775,8 @@ export default function App() {
               )}
 
               <div className="sidebar-bottom-controls">
-                <button className="voice-toggle-btn" onClick={togglePause}>
-                  {isPaused ? '▶ Resume Voice' : '⏸ Pause Voice'}
+                <button className="voice-toggle-btn" onClick={audioNeedsUserGesture ? playBlockedAudio : togglePause}>
+                  {audioNeedsUserGesture ? '▶ Play Voice' : isPaused ? '▶ Resume Voice' : '⏸ Pause Voice'}
                 </button>
                 <input 
                   className="realtime-feedback-box"
@@ -1700,6 +1793,12 @@ export default function App() {
 
             <div className="classroom-main-board" ref={scrollRef}>
               <div className="board-scrollable-container">
+                {selectedImage?.previewUrl && (
+                  <figure className="uploaded-image-context">
+                    <img src={selectedImage.previewUrl} alt={`Uploaded lesson image: ${selectedImage.name}`} />
+                    <figcaption>Uploaded image · {selectedImage.name}</figcaption>
+                  </figure>
+                )}
                 <AnimatePresence>
                   {blocks.map((step) => (
                     <motion.div 

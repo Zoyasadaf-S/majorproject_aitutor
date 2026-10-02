@@ -646,6 +646,44 @@ body, html, #root {
   align-items: center;
 }
 
+.visual-loading,
+.visual-unavailable {
+  width: min(100%, 720px);
+  margin: 12px auto;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 230, 153, 0.22);
+  border-radius: 8px;
+  color: #c8d8ce;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.uploaded-image-context {
+  width: fit-content;
+  max-width: min(100%, 560px);
+  margin: 0 auto 24px;
+  padding: 10px;
+  border: 1px solid rgba(255, 230, 153, 0.28);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.uploaded-image-context img {
+  display: block;
+  max-width: 100%;
+  max-height: 300px;
+  margin: 0 auto;
+  border-radius: 5px;
+  object-fit: contain;
+}
+
+.uploaded-image-context figcaption {
+  margin-top: 7px;
+  color: #c8d8ce;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
 .media-caption-bar {
   margin-top: 12px;
   color: #ffe699;
@@ -669,7 +707,9 @@ body, html, #root {
 
 .rendered-code-container pre {
   margin: 0;
-  white-space: pre-wrap;
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
   font-size: 15px;
 }
 
@@ -755,6 +795,10 @@ body, html, #root {
     height: 65vh;
     border-width: 6px;
     padding: 20px;
+  }
+
+  .uploaded-image-context img {
+    max-height: 220px;
   }
 }
 
