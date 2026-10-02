@@ -1,5 +1,5 @@
 import sqlite3
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException, Header, status, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -8,12 +8,27 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import httpx
 import json
+import logging
 import os
 import re
 import uuid
 import edge_tts
+from datetime import datetime, timedelta
+from passlib.context import CryptContext
+import jwt
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+from rag_engine import (
+    init_rag_db,
+    process_and_store_document,
+    retrieve_relevant_chunks,
+    generate_document_overview_prompt,
+    process_and_store_image,
+    get_stored_image
+)
 
 load_dotenv()
 
@@ -32,10 +47,36 @@ if not os.path.exists("static"):
     os.makedirs("static")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# ── Security & Hashing Config ────────────────────────────────────────────────
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+JWT_SECRET = os.getenv("JWT_SECRET", "cognilearn_super_secret_jwt_key_2026_change_in_production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_DAYS = 7
+
 # ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect("cognilearn.db")
+    init_rag_db(conn)
     c = conn.cursor()
+
+    # 1. Users table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ''')
+
+    # 1b. Add role column if it doesn't exist (migration for existing databases)
+    c.execute("PRAGMA table_info(users)")
+    user_cols = [col[1] for col in c.fetchall()]
+    if "role" not in user_cols:
+        c.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+
+    # 2. History table
     c.execute('''
         CREATE TABLE IF NOT EXISTS history (
             id TEXT PRIMARY KEY,
@@ -45,6 +86,16 @@ def init_db():
             date TEXT
         )
     ''')
+    c.execute("PRAGMA table_info(history)")
+    history_cols = [col[1] for col in c.fetchall()]
+    if "user_id" not in history_cols:
+        c.execute("ALTER TABLE history ADD COLUMN user_id TEXT DEFAULT 'demo-user-id'")
+    if "subject" not in history_cols:
+        c.execute("ALTER TABLE history ADD COLUMN subject TEXT DEFAULT 'General'")
+    if "language" not in history_cols:
+        c.execute("ALTER TABLE history ADD COLUMN language TEXT DEFAULT 'en'")
+
+    # 3. Practice progress table
     c.execute('''
         CREATE TABLE IF NOT EXISTS practice_progress (
             id TEXT PRIMARY KEY,
@@ -55,6 +106,45 @@ def init_db():
             date TEXT
         )
     ''')
+    c.execute("PRAGMA table_info(practice_progress)")
+    practice_cols = [col[1] for col in c.fetchall()]
+    if "user_id" not in practice_cols:
+        c.execute("ALTER TABLE practice_progress ADD COLUMN user_id TEXT DEFAULT 'demo-user-id'")
+
+    # 4. Login activity tracking table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS login_activity (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            login_time TEXT NOT NULL,
+            user_agent TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    ''')
+
+    # Seed demo user if not existing
+    demo_id = "demo-user-id"
+    c.execute("SELECT id FROM users WHERE id = ?", (demo_id,))
+    if not c.fetchone():
+        demo_hash = pwd_context.hash("demo123")
+        c.execute(
+            "INSERT INTO users (id, name, email, password_hash, created_at, role) VALUES (?, ?, ?, ?, ?, ?)",
+            (demo_id, "Zoya Sadaf", "demo@cognilearn.ai", demo_hash, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), "user")
+        )
+
+    # Seed admin account from environment variables (only if it doesn't exist)
+    admin_email = os.getenv("ADMIN_EMAIL", "admin@cognilearn.ai")
+    admin_password = os.getenv("ADMIN_INITIAL_PASSWORD", "AdminPass123!")
+    c.execute("SELECT id FROM users WHERE email = ?", (admin_email,))
+    if not c.fetchone():
+        admin_id = str(uuid.uuid4())
+        admin_hash = pwd_context.hash(admin_password)
+        c.execute(
+            "INSERT INTO users (id, name, email, password_hash, created_at, role) VALUES (?, ?, ?, ?, ?, ?)",
+            (admin_id, "Administrator", admin_email, admin_hash, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), "admin")
+        )
+        print(f"[init] Admin account created: {admin_email}")
+
     conn.commit()
     conn.close()
 
@@ -120,6 +210,8 @@ LANGUAGE DETECTION (CRITICAL — FIRST RULE)
 • If the student mixes languages (e.g. Hinglish), use the dominant language code.
 • If the student changes language mid-lesson during an interruption, switch your response
   language to match the interruption language, while preserving all lesson context.
+• If the student explicitly asks for a language, use that language even if the request is written in another one.
+• Write all natural-language headings, points, explanations, questions, warnings, and summaries in that language and its usual script. Keep only standard technical terms, code, formulas, and notation unchanged when needed.
 • NEVER render [LANG] tags visibly — they are internal machine-readable tags only.
 • Apply this rule to ALL content: headings, points, explanations, summaries, questions.
 
@@ -136,9 +228,10 @@ CRITICAL RULE FOR ALL SUBJECTS (NON-STEM, GEOGRAPHY, GENERAL, HISTORY, ETC.):
 • NEVER output only an [IMAGE] or [DIAGRAM] without accompanying text explanations.
 • Images and diagrams are SUPPORTING MATERIAL ONLY — they must NEVER replace text explanations.
 • Every response for EVERY subject MUST contain a complete explanation payload:
-  1. [HEADING] for the section title.
-  2. At least 3 to 5 [POINT] tags providing key bullet facts.
-  3. At least one substantial [EXPLAIN] block (6–10 detailed sentences).
+  1. A focused [HEADING] when it helps organize the answer.
+  2. The number of [POINT] tags needed to answer the actual question, usually 1–4.
+  3. A clear [EXPLAIN] block when an explanation is needed; do not pad a direct answer.
+• Treat [HEADING], [POINT], [MATH], [CODE], [DIAGRAM], [IMAGE], [WARNING], [QUESTION], and [SUMMARY] as concise board content. Treat [EXPLAIN] as detailed spoken narration only; never repeat a full explanation in board tags.
 
 ======================================================
 GENERAL BEHAVIOUR
@@ -146,8 +239,8 @@ GENERAL BEHAVIOUR
 • Teach naturally, like a friendly classroom teacher.
 • Never sound robotic. Never dump textbook paragraphs.
 • Keep explanations clear, structured, comprehensive, and exam-useful.
-• Prefer clarity, depth, and precision over extreme brevity.
-• Use [POINT] tags heavily to list key facts as concise bullet points.
+• Answer the actual question first. Match depth to the request: concise for a narrow question and more detailed for a broad or multi-step one.
+• Use [POINT] tags for distinct facts, not repeated paraphrases.
 • Explain one idea at a time.
 • Keep the student curious. Encourage thinking.
 • Adapt based on subject context — be dynamic, not formulaic.
@@ -155,10 +248,9 @@ GENERAL BEHAVIOUR
 ======================================================
 EXPLANATION QUALITY & LENGTH (CRITICAL FOR [EXPLAIN])
 ======================================================
-• Short 1-2 sentence explanations are STRICTLY FORBIDDEN.
-• Explanations must be thorough, substantial, and clear. Target a total spoken TTS reading duration of roughly 2.5 to 3.5 minutes (approx. 300 to 450 words spread across 6 to 10 well-crafted sentences).
+• Do not force every answer into a long lesson. A focused question usually needs 2–4 clear sentences; a broad topic can use 4–8 well-crafted sentences.
 • Maintain clear, easy-to-understand language — neither overly technical/academic nor overly childish.
-• Every complete [EXPLAIN] block MUST thoroughly integrate all four of these components:
+• For broad conceptual explanations, include the relevant items from this list without forcing irrelevant material:
   1. Clear Definition: Explain what the concept is in clear, direct language.
   2. Core Significance / Why it matters: Detail why this concept occurs, why it is important, and how it connects to the real world or exams.
   3. Simple Analogy or Real-World Example: Provide a relatable, step-by-step everyday scenario or comparison to make the concept intuitive.
@@ -168,11 +260,9 @@ EXPLANATION QUALITY & LENGTH (CRITICAL FOR [EXPLAIN])
 ======================================================
 EXAM-ORIENTED OUTPUT (PRIMARY PURPOSE)
 ======================================================
-• Every answer must help a student understand AND remember for an exam.
-• Use enough bullet points to cover the concept adequately.
-• Avoid: short surface-level answers, huge unreadable essays, repetition, filler.
-• Structure: introduce → key points → detailed 6-10 sentence explanation → real-world example → visual aid if applicable.
-• Substantial length overall. Allow enough sentences so the student truly grasps the idea.
+• Help the student understand and remember the answer at the depth they requested.
+• Avoid both unsupported one-line answers to complex questions and long essays for simple questions.
+• Do not add an introduction, example, or visual unless it helps answer the question.
 
 ======================================================
 TEACHING STYLE
@@ -199,7 +289,7 @@ A) [DIAGRAM] — Canvas-drawn educational diagrams.
    • force_block    : Physics mechanics, forces, friction, gravity, tension, mass on surface, Newton's laws.
    • ray_diagram    : Light, optics, reflection, refraction, lenses (convex/concave), mirrors, principal axis.
    • circuit        : Electricity, electric circuits, voltage, current, resistors, Ohm's law, series/parallel.
-   • flow_diagram   : Sequential processes, algorithms, logic workflows, decision trees, lifecycle steps.
+   • flow_diagram   : Only short, straight-through processes or algorithms with no branches or loops. Supply the exact ordered steps as JSON; omit diagrams for decisions, branches, loops, and large programs.
    • osi_layers     : Computer networking, OSI 7-layer model, network protocol stacks, TCP/IP layers.
    • water_cycle    : Environmental science, hydrology, water cycle (evaporation, condensation, precipitation, runoff).
    • graph          : Mathematical plots, coordinate geometry, functions, algebraic curves, y=f(x).
@@ -207,13 +297,14 @@ A) [DIAGRAM] — Canvas-drawn educational diagrams.
    • triangle / right_triangle : Trigonometry, geometric triangles, right-angled triangles, Pythagorean theorem.
    • bar_chart      : Statistics, data comparison, categorical distributions.
 
+   For flow_diagram use [DIAGRAM]{"type":"flow_diagram","steps":[{"label":"Start","kind":"start"},{"label":"...","kind":"process"},{"label":"End","kind":"end"}]}[/DIAGRAM]. Use 2–6 concrete steps, exactly as explained in the lesson. Supported kinds: start, process, input, output, end. Localize visible labels. The renderer does not support branches or loops.
    IF THE CONCEPT DOES NOT EXACTLY FIT ONE OF THESE TYPES, DO NOT USE A [DIAGRAM] TAG.
 
 B) [IMAGE] — Real-world / reference images fetched from web search.
-   Use when a real photograph, map, anatomy diagram, historical visual, or domain schematic helps.
+   Use only when a specific, relevant real photograph, map, anatomy diagram, historical visual, or domain schematic would materially help. Name the actual subject or structure; omit it if relevance is uncertain.
    Use [IMAGE] instead of [DIAGRAM] for topics without an exact canvas diagram type (e.g. human heart anatomy, historical events, plant cell structures, chemical apparatus, geography maps, database ER diagrams).
 
-   CRITICAL: Inside [IMAGE] tags, put ONLY a short factual educational search query (3–7 words). NOT an AI generation prompt. NOT the raw student question.
+   CRITICAL: Inside [IMAGE] tags, put ONLY a short factual English search query (3–7 words) naming the exact subject. NOT an AI generation prompt. NOT the raw student question. This query is internal search metadata; keep student-facing content in the selected language.
 
    Examples:
      [IMAGE]French Revolution storming Bastille historical[/IMAGE]
@@ -235,11 +326,11 @@ Every tag MUST be opened and closed. Use ONLY these tags:
 [LANG][/LANG]       — Language code. ALWAYS first. NEVER rendered to student.
 [HEADING][/HEADING] — Topic, subtopic, law, theorem, definition.
 [POINT][/POINT]     — One bullet fact. Max 2 short sentences. No equations or code.
-[EXPLAIN][/EXPLAIN] — Spoken explanation (6-10 sentences, ~2.5-3.5 mins spoken, with definition, significance, analogy, takeaway). No LaTeX. No shorthand units. Plain spoken language.
+[EXPLAIN][/EXPLAIN] — Spoken explanation whose length matches the question and requested depth. Include useful context and examples where appropriate. No LaTeX. No shorthand units. Plain spoken language.
 [IMAGE][/IMAGE]     — Educational search query for a real-world image.
 [DIAGRAM][/DIAGRAM] — Diagram type keyword (MUST match valid diagram types strictly).
 [MATH][/MATH]       — Raw LaTeX only. No $$, no explanations inside.
-[CODE][/CODE]       — Short code snippet. Explain line-by-line.
+[CODE][/CODE]       — Complete requested program first; explain it after the code.
 [WARNING][/WARNING] — Important caution or common mistake.
 [SUMMARY][/SUMMARY] — Max 4 bullet points recap.
 
@@ -256,6 +347,9 @@ MATH RULES
 SPEECH / TTS RULE (CRITICAL)
 ======================================================
 • [EXPLAIN] is spoken aloud via Text-to-Speech.
+• [EXPLAIN] is narration only and must never contain board headings, bullet formatting, or duplicate the board verbatim. Explain the current board points in a natural, detailed spoken style.
+• Keep narration synchronized with the board in this same response: write each board point, formula, code block, or diagram first, then immediately explain that material in the next [EXPLAIN] block before moving to a different point.
+• Each [EXPLAIN] must refer only to the immediately preceding board content. Follow board order, expand definitions, code execution, formula variables, and diagram relationships as relevant, and do not introduce unrelated concepts.
 • NEVER put LaTeX, raw math symbols, or shorthand units inside [EXPLAIN].
 • Write numbers and formulas in full spoken words:
   "two centimeters per second squared" not "2 cm/s²"
@@ -297,6 +391,7 @@ Never dump buffered content — continue forward only.
 SUMMARY
 ======================================================
 Keep summaries short. Maximum 4 bullet points.
+Only include a summary when it adds a distinct takeaway; do not repeat or paraphrase board points already shown.
 
 ======================================================
 NO HOMEWORK OR EXERCISES
@@ -306,9 +401,40 @@ NO HOMEWORK OR EXERCISES
 • Focus entirely on high-quality explanations, clear bullet points, and a summary.
 """
 
+
+def subject_teaching_guidance(subject: Optional[str]) -> str:
+    """Add concise guidance for the selected subject without changing stream tags."""
+    normalized = (subject or "General").strip().casefold()
+    if normalized in {"mathematics", "physics"}:
+        return """
+SUBJECT GUIDANCE — MATHEMATICS / PHYSICS
+For a numerical problem, solve only the values given: use [POINT]s for the given values, formula, substitution, and calculation as needed, then state a clear final answer with units. Write those labels in the response language. Put equations in [MATH]. Check arithmetic, signs, and units. If essential information is missing, ask for it instead of inventing values. For conceptual questions or proofs, use a logical explanation rather than forcing the numerical format.
+"""
+    if normalized in {
+        "computer science", "programming", "engineering", "electronics", "iot",
+        "networking", "operating systems", "dbms",
+    }:
+        return """
+SUBJECT GUIDANCE — COMPUTER SCIENCE / ENGINEERING
+For a request to write or fix a program, briefly state the task, put the complete working program in one [CODE] block before its explanation, then explain meaningful lines or small groups in order. Include sample input/output only when useful. Do not give fragments when a complete program was requested. For conceptual questions, answer the concept directly without adding code or a flowchart unless it helps.
+"""
+    if normalized == "biology":
+        return """
+SUBJECT GUIDANCE — BIOLOGY
+Explain the requested structure or process at the requested depth. Include relevant parts, functions, stages, causes, or examples, but do not repeat points. Use a diagram or specific real image only when it clarifies the requested biology concept; never use an unrelated visual.
+"""
+    if normalized in {"history", "geography", "civics", "economics", "social science"}:
+        return """
+SUBJECT GUIDANCE — SOCIAL SCIENCE
+Focus on the requested place, period, people, or issue. Include relevant causes, characteristics, sequence, evidence, effects, and examples without padding. Use a date, map, or image only when it is directly relevant and supported by the question; distinguish established facts from uncertainty.
+"""
+    return ""
+
 # ── Pydantic models ───────────────────────────────────────────────────────────
 class TeachRequest(BaseModel):
-    topic: str
+    topic: Optional[str] = ""
+    document_id: Optional[str] = None
+    image_id: Optional[str] = None
     subject: Optional[str] = "General"   # hint only — not used to select prompt
 
 class InterruptRequest(BaseModel):
@@ -327,6 +453,8 @@ class HistoryItem(BaseModel):
     blocks: List[Dict[str, Any]]
     questionsAsked: List[str]
     date: str
+    subject: Optional[str] = "General"
+    language: Optional[str] = "en"
 
 class EvaluateRequest(BaseModel):
     topic: str
@@ -336,6 +464,9 @@ class EvaluateRequest(BaseModel):
 class QuizRequest(BaseModel):
     topic: str
     subject: str = "General"
+    difficulty: str = "Medium"
+    language: str = "English"
+    document_id: Optional[str] = None
 
 class PracticeProgressItem(BaseModel):
     id: str
@@ -344,6 +475,369 @@ class PracticeProgressItem(BaseModel):
     score: int
     total: int
     date: str
+
+class UserRegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class UserRoleUpdateRequest(BaseModel):
+    role: str
+
+# ── Auth Helper Functions ─────────────────────────────────────────────────────
+def create_access_token(user_id: str, email: str) -> str:
+    expire = datetime.utcnow() + timedelta(days=JWT_EXPIRATION_DAYS)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "exp": expire
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication token required")
+    token = authorization.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("SELECT id, name, email, role FROM users WHERE id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="User account not found")
+
+    return {"id": row[0], "name": row[1], "email": row[2], "role": row[3] or "user"}
+
+def get_current_admin(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    user = get_current_user(authorization)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Access denied. Administrator privileges required.")
+    return user
+
+# ── Authentication API Endpoints ─────────────────────────────────────────────
+@app.post("/api/auth/register")
+async def register_user(req: UserRegisterRequest):
+    name = req.name.strip()
+    email = req.email.strip().lower()
+    password = req.password
+
+    if not name or not email or not password:
+        raise HTTPException(status_code=400, detail="Name, email, and password are required")
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Please provide a valid email address")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long")
+
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT id FROM users WHERE email = ?", (email,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+
+    user_id = str(uuid.uuid4())
+    password_hash = pwd_context.hash(password)
+    created_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Force role to 'user' on public registration
+    c.execute(
+        "INSERT INTO users (id, name, email, password_hash, created_at, role) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, name, email, password_hash, created_at, "user")
+    )
+    conn.commit()
+    conn.close()
+
+    token = create_access_token(user_id, email)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user_id, "name": name, "email": email, "role": "user"}
+    }
+
+@app.post("/api/auth/login")
+async def login_user(req: UserLoginRequest, raw_req: Request):
+    email = req.email.strip().lower()
+    password = req.password
+
+    if not email or not password:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("SELECT id, name, email, password_hash, role FROM users WHERE email = ?", (email,))
+    row = c.fetchone()
+
+    if not row or not pwd_context.verify(password, row[3]):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    user_id, name, user_email, _, role = row[0], row[1], row[2], row[3], row[4] or "user"
+
+    # Record login activity
+    act_id = str(uuid.uuid4())
+    login_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    user_agent = raw_req.headers.get("user-agent", "Unknown Browser")
+    c.execute(
+        "INSERT INTO login_activity (id, user_id, login_time, user_agent) VALUES (?, ?, ?, ?)",
+        (act_id, user_id, login_time, user_agent)
+    )
+    conn.commit()
+    conn.close()
+
+    token = create_access_token(user_id, user_email)
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": user_id, "name": name, "email": user_email, "role": role}
+    }
+
+@app.get("/api/auth/me")
+async def get_me(authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    return {"user": user}
+
+@app.post("/api/auth/logout")
+async def logout_user():
+    return {"status": "success", "message": "Successfully logged out"}
+
+# ── Admin API Endpoints ───────────────────────────────────────────────────────
+@app.get("/api/admin/users")
+async def get_admin_users(authorization: Optional[str] = Header(None)):
+    get_current_admin(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT id, name, email, role, created_at FROM users ORDER BY created_at DESC")
+    users = c.fetchall()
+
+    result = []
+    for u in users:
+        uid, name, email, role, created_at = u[0], u[1], u[2], u[3], u[4]
+
+        # Last login timestamp
+        c.execute("SELECT login_time FROM login_activity WHERE user_id = ? ORDER BY login_time DESC LIMIT 1", (uid,))
+        ll_row = c.fetchone()
+        last_login = ll_row[0] if ll_row else "Never"
+
+        # Lessons completed count
+        c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (uid,))
+        lessons_completed = c.fetchone()[0]
+
+        # Quizzes attempted & avg score
+        c.execute("SELECT COUNT(*), SUM(score), SUM(total) FROM practice_progress WHERE user_id = ?", (uid,))
+        q_row = c.fetchone()
+        quizzes_attempted = q_row[0] if q_row else 0
+        sum_score = q_row[1] or 0
+        sum_total = q_row[2] or 0
+
+        if sum_total > 0:
+            avg_quiz_score = f"{round((sum_score / sum_total) * 100)}%"
+        else:
+            avg_quiz_score = "0%"
+
+        result.append({
+            "id": uid,
+            "name": name,
+            "email": email,
+            "role": role,
+            "created_at": created_at,
+            "last_login": last_login,
+            "lessons_completed": lessons_completed,
+            "quizzes_attempted": quizzes_attempted,
+            "avg_quiz_score": avg_quiz_score
+        })
+
+    conn.close()
+    return result
+
+@app.get("/api/admin/users/{user_id}/details")
+async def get_admin_user_details(user_id: str, authorization: Optional[str] = Header(None)):
+    get_current_admin(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT id, name, email, role, created_at FROM users WHERE id = ?", (user_id,))
+    u = c.fetchone()
+    if not u:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    uid, name, email, role, created_at = u[0], u[1], u[2], u[3], u[4]
+
+    # Last login
+    c.execute("SELECT login_time FROM login_activity WHERE user_id = ? ORDER BY login_time DESC LIMIT 1", (uid,))
+    ll_row = c.fetchone()
+    last_login = ll_row[0] if ll_row else "Never"
+
+    # Lessons completed
+    c.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (uid,))
+    lessons_completed = c.fetchone()[0]
+
+    # Quizzes attempted & score totals
+    c.execute("SELECT COUNT(*), SUM(score), SUM(total) FROM practice_progress WHERE user_id = ?", (uid,))
+    q_row = c.fetchone()
+    quizzes_attempted = q_row[0] if q_row else 0
+    sum_score = q_row[1] or 0
+    sum_total = q_row[2] or 0
+
+    if sum_total > 0:
+        avg_quiz_score = f"{round((sum_score / sum_total) * 100)}%"
+    else:
+        avg_quiz_score = "0%"
+
+    # Detailed quiz history
+    c.execute("SELECT id, topic, subject, score, total, date FROM practice_progress WHERE user_id = ? ORDER BY date DESC", (uid,))
+    quiz_rows = c.fetchall()
+    quiz_history = [
+        {
+            "id": q[0],
+            "topic": q[1],
+            "subject": q[2],
+            "score": q[3],
+            "total": q[4],
+            "date": q[5]
+        }
+        for q in quiz_rows
+    ]
+
+    conn.close()
+
+    return {
+        "user": {
+            "id": uid,
+            "name": name,
+            "email": email,
+            "role": role,
+            "created_at": created_at,
+            "last_login": last_login
+        },
+        "stats": {
+            "lessons_completed": lessons_completed,
+            "quizzes_attempted": quizzes_attempted,
+            "avg_quiz_score": avg_quiz_score
+        },
+        "quiz_history": quiz_history
+    }
+
+@app.get("/api/admin/stats")
+async def get_admin_stats(authorization: Optional[str] = Header(None)):
+    get_current_admin(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM history")
+    total_history = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM practice_progress")
+    total_practice = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM login_activity")
+    total_logins = c.fetchone()[0]
+
+    c.execute("""
+        SELECT l.id, l.user_id, u.name, u.email, l.login_time, l.user_agent
+        FROM login_activity l
+        LEFT JOIN users u ON l.user_id = u.id
+        ORDER BY l.login_time DESC LIMIT 25
+    """)
+    recent_logins = [
+        {
+            "id": r[0],
+            "user_id": r[1],
+            "name": r[2] or "Unknown",
+            "email": r[3] or "Unknown",
+            "login_time": r[4],
+            "user_agent": r[5]
+        }
+        for r in c.fetchall()
+    ]
+    conn.close()
+
+    return {
+        "total_users": total_users,
+        "total_history": total_history,
+        "total_practice": total_practice,
+        "total_logins": total_logins,
+        "recent_logins": recent_logins
+    }
+
+@app.put("/api/admin/users/{user_id}/role")
+async def update_user_role(user_id: str, req: UserRoleUpdateRequest, authorization: Optional[str] = Header(None)):
+    admin = get_current_admin(authorization)
+    if req.role not in ["user", "admin"]:
+        raise HTTPException(status_code=400, detail="Role must be either 'user' or 'admin'")
+
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT id, role FROM users WHERE id = ?", (user_id,))
+    target = c.fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target[0] == admin["id"] and req.role != "admin":
+        conn.close()
+        raise HTTPException(status_code=400, detail="You cannot demote your own administrator account")
+
+    c.execute("UPDATE users SET role = ? WHERE id = ?", (req.role, user_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": f"User role updated to '{req.role}'"}
+
+@app.delete("/api/admin/users/{user_id}")
+async def delete_user_by_admin(user_id: str, authorization: Optional[str] = Header(None)):
+    admin = get_current_admin(authorization)
+    if admin["id"] == user_id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own administrator account.")
+
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+
+    c.execute("SELECT id, role FROM users WHERE id = ?", (user_id,))
+    target = c.fetchone()
+    if not target:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target[1] == "admin":
+        conn.close()
+        raise HTTPException(status_code=400, detail="Administrator accounts cannot be deleted.")
+
+    try:
+        c.execute("BEGIN TRANSACTION")
+        c.execute("DELETE FROM history WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM practice_progress WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM login_activity WHERE user_id = ?", (user_id,))
+        c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Failed to delete user account: {str(e)}")
+
+    conn.close()
+    return {"status": "success", "message": "User and all associated data permanently deleted."}
 
 # ── Groq streaming helper ─────────────────────────────────────────────────────
 async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: Request = None):
@@ -361,7 +855,7 @@ async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: 
     async with httpx.AsyncClient(timeout=60.0) as client:
         async with client.stream("POST", GROQ_API_URL, headers=headers, json=payload) as response:
             if response.status_code != 200:
-                yield f"data: {json.dumps({'error': f'API Error: {response.status_code}'})}\n\n"
+                yield f"data: {json.dumps({'error': f'API Error: {response.status_code}', 'status': response.status_code})}\n\n"
                 return
 
             async for chunk in response.aiter_lines():
@@ -378,20 +872,266 @@ async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: 
                         continue
             yield "data: [DONE]\n\n"
 
+# ── Document & Image API Endpoints ───────────────────────────────────────────
+@app.post("/api/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(None)
+):
+    user = get_current_user(authorization)
+    filename = file.filename or "uploaded_file.txt"
+    ext = os.path.splitext(filename)[1].lower()
+    allowed_exts = [".pdf", ".docx", ".pptx", ".txt", ".md"]
+    if ext not in allowed_exts:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file format. Please upload a PDF, DOCX, PPTX, TXT, or MD file."
+        )
+        
+    content = await file.read(25 * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File is too large. Please upload a file smaller than 25MB.")
+        
+    try:
+        res = process_and_store_document(user["id"], filename, content)
+        return {
+            "status": "success",
+            "document_id": res["document_id"],
+            "filename": res["filename"],
+            "reused": res.get("reused", False),
+            "chunk_count": res.get("chunk_count", 0)
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception:
+        logger.exception("Document processing failed for filename=%s", filename)
+        raise HTTPException(status_code=500, detail="We couldn't process this file because of a server error. Please try again later.")
+
+
+@app.get("/api/documents")
+async def get_user_documents(authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("SELECT id, filename, file_type, created_at FROM documents WHERE user_id = ? ORDER BY created_at DESC", (user["id"],))
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "filename": r[1], "file_type": r[2], "created_at": r[3]} for r in rows]
+
+
+@app.delete("/api/documents/{document_id}")
+async def delete_user_document(document_id: str, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM document_chunks WHERE document_id = ? AND user_id = ?", (document_id, user["id"]))
+    c.execute("DELETE FROM documents WHERE id = ? AND user_id = ?", (document_id, user["id"]))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Document deleted"}
+
+
+@app.post("/api/images/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    authorization: Optional[str] = Header(None)
+):
+    user = get_current_user(authorization)
+    filename = file.filename or "uploaded_image.png"
+    ext = os.path.splitext(filename)[1].lower()
+    allowed_exts = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"]
+    if ext not in allowed_exts:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported image format. Please upload a PNG, JPG, or WEBP image."
+        )
+        
+    content = await file.read(15 * 1024 * 1024 + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded image is empty.")
+    if len(content) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image file is too large. Please upload an image under 15MB.")
+        
+    try:
+        res = process_and_store_image(user["id"], filename, content)
+        return {
+            "status": "success",
+            "image_id": res["image_id"],
+            "filename": res["filename"],
+            "extracted_text": res["extracted_text"]
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception:
+        logger.exception("Image processing failed for filename=%s", filename)
+        raise HTTPException(status_code=500, detail="We couldn't process this image because of a server error. Please try again later.")
+
+
 # ── /api/teach ────────────────────────────────────────────────────────────────
 @app.post("/api/teach")
-async def start_lesson(req: TeachRequest, raw_request: Request):
+async def start_lesson(req: TeachRequest, raw_request: Request, authorization: Optional[str] = Header(None)):
+    user_id = None
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            curr_user = get_current_user(authorization)
+            user_id = curr_user["id"]
+        except Exception:
+            if req.document_id or req.image_id:
+                raise HTTPException(status_code=401, detail="Your session expired. Please sign in again to use the uploaded material.")
+
+    if (req.document_id or req.image_id) and not user_id:
+        raise HTTPException(status_code=401, detail="Please sign in again to use the uploaded material.")
+
+    topic_str = (req.topic or "").strip()
     subject_hint = f" (Subject hint: {req.subject})" if req.subject and req.subject != "General" else ""
-    messages = [{"role": "user", "content": f"Teach me comprehensively about: {req.topic}{subject_hint}"}]
+    
+    system_prompt = TEACH_SYSTEM + subject_teaching_guidance(req.subject)
+    messages = []
+    mode = "text"
+    num_chunks = 0
+    context_chars = 0
+    
+    # ── MODE DETERMINATION ───────────────────────────────────────────────────
+    if req.document_id and user_id:
+        if topic_str:
+            # Mode D: Topic + File
+            mode = "topic+file"
+            try:
+                retrieved = retrieve_relevant_chunks(user_id, req.document_id, topic_str, top_k=4)
+                num_chunks = len(retrieved)
+                if not retrieved:
+                    raise HTTPException(status_code=422, detail="No readable content was found for this topic in the uploaded document. Try a different topic or upload another file.")
+                chunks_str = "\n\n".join([f"[Source Page {c['page_number']}]: {c['text']}" for c in retrieved])
+                context_chars = len(chunks_str)
+                
+                source_instruction = f"""
+======================================================
+SOURCE-GROUNDED TEACHING FROM UPLOADED LEARNING MATERIAL
+======================================================
+You are teaching from the student's uploaded document.
+Use the retrieved source material below as the primary factual basis.
+Do not invent details that are not supported by the retrieved material.
+If the retrieved material does not contain enough information to answer the request, clearly say that the uploaded material does not contain enough information.
+You may explain concepts in simpler language, but do not change the meaning of the source.
+
+RETRIEVED SOURCE MATERIAL (Top {num_chunks} Chunks):
+{chunks_str}
+"""
+                system_prompt = TEACH_SYSTEM + "\n" + source_instruction
+                messages = [{"role": "user", "content": f"Teach me comprehensively about: {topic_str}{subject_hint}"}]
+            except HTTPException:
+                raise
+            except PermissionError as e:
+                logger.exception("Document retrieval denied or missing")
+                raise HTTPException(status_code=404, detail="The uploaded document is no longer available. Please upload it again.") from e
+            except Exception as e:
+                logger.exception("Document retrieval failed")
+                raise HTTPException(status_code=500, detail="We couldn't retrieve the uploaded material. Please retry the upload.") from e
+        else:
+            # Mode B: File Only
+            mode = "file_only"
+            try:
+                filename, snippet = generate_document_overview_prompt(user_id, req.document_id)
+                if not snippet.strip():
+                    raise HTTPException(status_code=422, detail="No readable content was found in this document. Please upload a text-based or OCR-readable file.")
+                context_chars = len(snippet)
+                source_instruction = f"""
+======================================================
+FILE OVERVIEW MODE
+======================================================
+The student uploaded document '{filename}' without entering a specific subtopic.
+Snippet of document content:
+{snippet}
+
+INSTRUCTIONS FOR TEACHER:
+1. Emit [LANG] tag as the very first token.
+2. Provide a brief overview of the document contents and 3-4 key subtopics present in it.
+3. End with a question asking what specific subtopic the student wants to learn first.
+"""
+                system_prompt = TEACH_SYSTEM + "\n" + source_instruction
+                messages = [{"role": "user", "content": f"Please give me a high-level overview of my uploaded file '{filename}' and highlight key topics to study."}]
+            except HTTPException:
+                raise
+            except PermissionError as e:
+                logger.exception("Document overview denied or missing")
+                raise HTTPException(status_code=404, detail="The uploaded document is no longer available. Please upload it again.") from e
+            except Exception as e:
+                logger.exception("Document overview retrieval failed")
+                raise HTTPException(status_code=500, detail="We couldn't retrieve the uploaded material. Please retry the upload.") from e
+
+    elif req.image_id and user_id:
+        if topic_str:
+            # Mode E: Topic + Image
+            mode = "topic+image"
+            try:
+                img_data = get_stored_image(user_id, req.image_id)
+                extracted = img_data["extracted_text"]
+                context_chars = len(extracted)
+                source_instruction = f"""
+======================================================
+SOURCE-GROUNDED TEACHING FROM UPLOADED IMAGE
+======================================================
+The student uploaded an educational image '{img_data['filename']}'.
+Extracted Text/Content from Image:
+{extracted}
+
+Ground your lesson directly in the image content and answer the student's question accurately.
+"""
+                system_prompt = TEACH_SYSTEM + "\n" + source_instruction
+                messages = [{"role": "user", "content": f"Explain this image in detail. My question: {topic_str}{subject_hint}"}]
+            except PermissionError as e:
+                logger.exception("Image retrieval denied or missing")
+                raise HTTPException(status_code=404, detail="The uploaded image is no longer available. Please upload it again.") from e
+            except Exception as e:
+                logger.exception("Image retrieval failed")
+                raise HTTPException(status_code=500, detail="We couldn't retrieve the uploaded image. Please retry the upload.") from e
+        else:
+            # Mode C: Image Only
+            mode = "image_only"
+            try:
+                img_data = get_stored_image(user_id, req.image_id)
+                extracted = img_data["extracted_text"]
+                context_chars = len(extracted)
+                source_instruction = f"""
+======================================================
+IMAGE ANALYSIS & TEACHING MODE
+======================================================
+The student uploaded an educational image '{img_data['filename']}' without a topic query.
+Extracted Text/Content from Image:
+{extracted}
+
+INSTRUCTIONS FOR TEACHER:
+1. Emit [LANG] tag as the very first token.
+2. Teach the student step-by-step about the concepts, formulas, or problems shown in this image.
+"""
+                system_prompt = TEACH_SYSTEM + "\n" + source_instruction
+                messages = [{"role": "user", "content": f"Explain the key concepts shown in my uploaded image '{img_data['filename']}'."}]
+            except PermissionError as e:
+                logger.exception("Image retrieval denied or missing")
+                raise HTTPException(status_code=404, detail="The uploaded image is no longer available. Please upload it again.") from e
+            except Exception as e:
+                logger.exception("Image retrieval failed")
+                raise HTTPException(status_code=500, detail="We couldn't retrieve the uploaded image. Please retry the upload.") from e
+
+    else:
+        # Mode A: Topic Only (Preserves existing behavior)
+        mode = "text_only"
+        messages = [{"role": "user", "content": f"Teach me comprehensively about: {topic_str}{subject_hint}"}]
+
+    # Dev token logging
+    print(f"[TOKEN_LOG] mode={mode} | doc_id={req.document_id} | image_id={req.image_id} | num_chunks={num_chunks} | context_chars={context_chars} | model={GROQ_MODEL}")
+    
     return StreamingResponse(
-        stream_groq(messages, TEACH_SYSTEM, raw_request),
+        stream_groq(messages, system_prompt, raw_request),
         media_type="text/event-stream"
     )
 
 # ── /api/interrupt ────────────────────────────────────────────────────────────
 @app.post("/api/interrupt")
 async def interrupt_lesson(req: InterruptRequest, raw_request: Request):
-    interrupt_system = TEACH_SYSTEM + """
+    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + """
 
 ======================================================
 INTERRUPTION HANDLING — REAL TEACHER RULES (CRITICAL)
@@ -425,6 +1165,7 @@ FORBIDDEN ACTIONS:
             "role": "user",
             "content": (
                 f"Topic being taught: {req.topic}\n"
+                f"Selected subject: {req.subject or 'General'}\n"
                 f"Student interruption: \"{req.question}\"\n\n"
                 f"CRITICAL EXECUTION ORDERS FOR TEACHER:\n"
                 f"1. Emit [LANG] tag as the very first token.\n"
@@ -445,6 +1186,28 @@ FORBIDDEN ACTIONS:
 # Returns JSON: { url, source, attribution, license }
 # Never uses AI image generation (no Pollinations.ai).
 # Returns { url: null } if no appropriate image is found.
+
+_IMAGE_QUERY_STOP_WORDS = {
+    "a", "an", "and", "the", "of", "for", "with", "in", "on", "to",
+    "image", "picture", "photo", "photograph", "diagram", "labeled", "labelled",
+    "illustration", "process", "overview", "educational", "showing",
+}
+
+
+def image_matches_query(query: str, *candidate_text: str) -> bool:
+    """Reject search results with no meaningful subject overlap."""
+    query_terms = {
+        word for word in re.findall(r"[\w]+", query.casefold())
+        if len(word) > 2 and word not in _IMAGE_QUERY_STOP_WORDS
+    }
+    if not query_terms:
+        return False
+    result_terms = {
+        word for text in candidate_text if text
+        for word in re.findall(r"[\w]+", text.casefold())
+    }
+    required_matches = 1 if len(query_terms) <= 2 else 2
+    return len(query_terms & result_terms) >= required_matches
 
 @app.get("/api/image")
 async def get_image(q: str):
@@ -477,15 +1240,17 @@ async def get_image(q: str):
                     thumb_url = ii.get("thumburl") or ii.get("url", "")
                     if not thumb_url:
                         continue
+                    meta = ii.get("extmetadata", {})
+                    desc = meta.get("ImageDescription", {}).get("value", "")
+                    desc = re.sub(r"<[^>]+>", "", desc).strip()
+                    if not image_matches_query(q, page.get("title", ""), desc):
+                        continue
                     # Skip SVG/OGG/audio/video files — we want raster images
                     if any(thumb_url.lower().endswith(ext) for ext in [".svg", ".ogg", ".ogv", ".webm", ".mp4", ".pdf"]):
                         continue
-                    meta = ii.get("extmetadata", {})
                     artist = meta.get("Artist", {}).get("value", "")
                     artist = re.sub(r"<[^>]+>", "", artist).strip()  # strip HTML tags
                     lic    = meta.get("LicenseShortName", {}).get("value", "")
-                    desc   = meta.get("ImageDescription", {}).get("value", "")
-                    desc   = re.sub(r"<[^>]+>", "", desc).strip()
                     return JSONResponse({
                         "url": thumb_url,
                         "source": "Wikimedia Commons",
@@ -511,7 +1276,7 @@ async def get_image(q: str):
             if wp_resp.status_code == 200:
                 pages = wp_resp.json()["query"]["pages"]
                 page = next(iter(pages.values()))
-                if "thumbnail" in page:
+                if "thumbnail" in page and image_matches_query(q, page.get("title", "")):
                     page_url = page.get("fullurl", "https://en.wikipedia.org")
                     return JSONResponse({
                         "url": page["thumbnail"]["source"],
@@ -540,7 +1305,7 @@ async def get_image(q: str):
             if wp_search_resp.status_code == 200:
                 pages = wp_search_resp.json().get("query", {}).get("pages", {})
                 for page in pages.values():
-                    if "thumbnail" in page:
+                    if "thumbnail" in page and image_matches_query(q, page.get("title", "")):
                         return JSONResponse({
                             "url": page["thumbnail"]["source"],
                             "source": "Wikipedia",
@@ -557,15 +1322,18 @@ async def get_image(q: str):
                     "https://api.unsplash.com/search/photos",
                     params={
                         "query": q,
-                        "per_page": "1",
+                        "per_page": "5",
                         "orientation": "landscape"
                     },
                     headers={"Authorization": f"Client-ID {UNSPLASH_API_KEY}"}
                 )
                 if us_resp.status_code == 200:
                     results = us_resp.json().get("results", [])
-                    if results:
-                        photo = results[0]
+                    for photo in results:
+                        if not image_matches_query(
+                            q, photo.get("alt_description", ""), photo.get("description", "")
+                        ):
+                            continue
                         user = photo.get("user", {})
                         photographer = user.get("name", "Unsplash photographer")
                         return JSONResponse({
@@ -607,39 +1375,55 @@ async def get_tts(req: TTSRequest):
 
 # ── /api/history ──────────────────────────────────────────────────────────────
 @app.post("/api/history")
-async def save_history(item: HistoryItem):
+async def save_history(item: HistoryItem, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO history (id, topic, blocks, questions, date) VALUES (?, ?, ?, ?, ?)",
-              (item.id, item.topic, json.dumps(item.blocks), json.dumps(item.questionsAsked), item.date))
+    c.execute("INSERT OR REPLACE INTO history (id, user_id, topic, blocks, questions, date, subject, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              (item.id, user["id"], item.topic, json.dumps(item.blocks), json.dumps(item.questionsAsked), item.date, item.subject or "General", item.language or "en"))
     conn.commit()
     conn.close()
     return {"status": "success"}
 
 @app.get("/api/history")
-async def get_history():
+async def get_history(authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("SELECT id, topic, blocks, questions, date FROM history ORDER BY date DESC")
+    c.execute("SELECT id, topic, blocks, questions, date, subject, language FROM history WHERE user_id = ? ORDER BY date DESC", (user["id"],))
     rows = c.fetchall()
     conn.close()
 
+    def parse_list(value):
+        if not value:
+            return []
+        try:
+            parsed = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+
     result = []
     for r in rows:
+        blocks = [block for block in parse_list(r[2]) if isinstance(block, dict) and isinstance(block.get("tag"), str)]
+        questions = [question for question in parse_list(r[3]) if isinstance(question, str)]
         result.append({
             "id": r[0],
-            "topic": r[1],
-            "blocks": json.loads(r[2]),
-            "questionsAsked": json.loads(r[3]),
-            "date": r[4]
+            "topic": r[1] or "Recorded lesson",
+            "blocks": blocks,
+            "questionsAsked": questions,
+            "date": r[4] or "",
+            "subject": r[5] or "General",
+            "language": r[6] or "en"
         })
     return result
 
 @app.delete("/api/history/{item_id}")
-async def delete_history(item_id: str):
+async def delete_history(item_id: str, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("DELETE FROM history WHERE id = ?", (item_id,))
+    c.execute("DELETE FROM history WHERE id = ? AND user_id = ?", (item_id, user["id"]))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -702,19 +1486,41 @@ You MUST respond strictly with valid JSON in this exact structure:
 
 # ── /api/quiz ─────────────────────────────────────────────────────────────────
 @app.post("/api/quiz")
-async def generate_topic_quiz(req: QuizRequest):
+async def generate_topic_quiz(req: QuizRequest, authorization: Optional[str] = Header(None)):
+    difficulty = req.difficulty.strip().title()
+    if difficulty not in {"Easy", "Medium", "Hard"}:
+        raise HTTPException(status_code=422, detail="Difficulty must be Easy, Medium, or Hard.")
+    source_context = ""
+    if req.document_id:
+        user = get_current_user(authorization)
+        chunks = retrieve_relevant_chunks(user["id"], req.document_id, req.topic, top_k=5)
+        if chunks:
+            source_context = "\n\nPrioritize this uploaded lesson material as the source of truth:\n" + "\n\n".join(c["text"] for c in chunks)
+
+    difficulty_guidance = {
+        "Easy": "Test basic definitions, fundamental concepts, and direct recall.",
+        "Medium": "Test conceptual understanding and application, including multiple reasoning steps where appropriate.",
+        "Hard": "Test advanced concepts, challenging scenarios, problem-solving, and deeper multi-step reasoning."
+    }[difficulty]
     prompt = f"""
 You are an academic test designer.
 Subject: {req.subject}
 Topic: {req.topic}
+Difficulty: {difficulty}
+Language: {req.language} (ISO-639 language code if abbreviated; write naturally in that language).
+{difficulty_guidance}
+{source_context}
 
 Task:
-Generate 3 distinct multiple-choice questions testing core concepts of "{req.topic}".
+Generate exactly 5 distinct, non-duplicate multiple-choice questions testing only the topic and subject above.
+Use the requested difficulty to change the actual reasoning complexity. Write all question text, options, and explanations in {req.language}.
+Preserve meaningful line breaks, indentation, paragraphs, and numbered lists in question text, options, and explanations. Put multiline programming code in fenced Markdown code blocks with the language name; encode line breaks as JSON escape sequences rather than flattening the code.
 For each question provide:
-- question text
-- 3 options labeled "A", "B", "C"
+- a clear question statement
+- exactly 4 options labeled "A", "B", "C", "D"
 - correct option ID ("A", "B", or "C")
-- clear, educational explanation for the correct answer
+- a short explanation for the correct answer
+Ensure exactly one option is correct and every correct_id matches one option ID.
 
 You MUST respond strictly with valid JSON array in this exact structure:
 [
@@ -724,7 +1530,8 @@ You MUST respond strictly with valid JSON array in this exact structure:
     "options": [
       {{"id": "A", "text": "..."}},
       {{"id": "B", "text": "..."}},
-      {{"id": "C", "text": "..."}}
+      {{"id": "C", "text": "..."}},
+      {{"id": "D", "text": "..."}}
     ],
     "correct_id": "B",
     "explanation": "..."
@@ -753,40 +1560,60 @@ You MUST respond strictly with valid JSON array in this exact structure:
                 start_idx = content.find('[')
                 end_idx   = content.rfind(']')
                 if start_idx != -1 and end_idx != -1:
-                    return json.loads(content[start_idx: end_idx + 1])
+                    generated = json.loads(content[start_idx: end_idx + 1])
+                    if not isinstance(generated, list) or len(generated) != 5:
+                        raise ValueError("Quiz must contain exactly five questions")
+                    normalized = []
+                    seen_questions = set()
+                    for index, item in enumerate(generated):
+                        if not isinstance(item, dict):
+                            raise ValueError("Question is not an object")
+                        question = item.get("question")
+                        options = item.get("options")
+                        correct_id = item.get("correct_id")
+                        explanation = item.get("explanation")
+                        if not isinstance(question, str) or not question.strip() or not isinstance(explanation, str) or not explanation.strip():
+                            raise ValueError("Question or explanation is missing")
+                        fingerprint = re.sub(r"\W+", " ", question.casefold()).strip()
+                        if fingerprint in seen_questions:
+                            raise ValueError("Duplicate question")
+                        seen_questions.add(fingerprint)
+                        if not isinstance(options, list) or len(options) != 4:
+                            raise ValueError("Each question must have four options")
+                        option_ids = [option.get("id") for option in options if isinstance(option, dict)]
+                        if len(option_ids) != 4 or set(option_ids) != {"A", "B", "C", "D"} or len({option.get("text", "").strip() for option in options if isinstance(option, dict) and isinstance(option.get("text"), str)}) != 4:
+                            raise ValueError("Options must be four distinct A-D choices")
+                        if correct_id not in option_ids or any(not isinstance(option.get("text"), str) or not option["text"].strip() for option in options):
+                            raise ValueError("Correct answer or option text is invalid")
+                        # Validate with strip(), but return the model's original strings. Trimming
+                        # the payload can remove meaningful indentation or boundary newlines.
+                        normalized.append({"id": str(index + 1), "question": question, "options": options, "correct_id": correct_id, "explanation": explanation})
+                    return normalized
+            raise HTTPException(status_code=502, detail="Quiz generation failed. Please retry.")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[quiz] Error: {e}")
-
-    return [
-        {
-            "id": "1",
-            "question": f"Which core principle is most fundamental when analyzing {req.topic}?",
-            "options": [
-                {"id": "A", "text": "Empirical observation and theoretical derivations"},
-                {"id": "B", "text": "Unverified heuristic assumptions"},
-                {"id": "C", "text": "Random boundary condition analysis"}
-            ],
-            "correct_id": "A",
-            "explanation": f"Understanding {req.topic} requires grounded empirical principles and structured derivations."
-        }
-    ]
+    raise HTTPException(status_code=502, detail="Quiz generation returned an invalid response. Please retry.")
 
 # ── /api/practice ─────────────────────────────────────────────────────────────
 @app.post("/api/practice")
-async def save_practice_progress(item: PracticeProgressItem):
+async def save_practice_progress(item: PracticeProgressItem, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO practice_progress (id, topic, subject, score, total, date) VALUES (?, ?, ?, ?, ?, ?)",
-              (item.id, item.topic, item.subject, item.score, item.total, item.date))
+    c.execute("INSERT OR REPLACE INTO practice_progress (id, user_id, topic, subject, score, total, date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (item.id, user["id"], item.topic, item.subject, item.score, item.total, item.date))
     conn.commit()
     conn.close()
     return {"status": "success"}
 
 @app.get("/api/practice")
-async def get_practice_progress():
+async def get_practice_progress(authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("SELECT id, topic, subject, score, total, date FROM practice_progress ORDER BY date DESC")
+    c.execute("SELECT id, topic, subject, score, total, date FROM practice_progress WHERE user_id = ? ORDER BY date DESC", (user["id"],))
     rows = c.fetchall()
     conn.close()
 

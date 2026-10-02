@@ -1,10 +1,11 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
 
-import CheckpointCard from './components/CheckpointCard';
 import PracticeQuizzesPage from './components/PracticeQuizzesPage';
+import UserProfileDropdown from './components/UserProfileDropdown';
+import AdminDashboard from './components/AdminDashboard';
 
 const API = 'http://127.0.0.1:8000/api';
 
@@ -53,10 +54,49 @@ const VisualImage = ({ query }) => {
   );
 };
 
+// Supported canvas diagram types — must match TEACH_SYSTEM prompt exactly
+const CANVAS_VALID_TYPES = new Set([
+  'right_triangle', 'triangle', 'circuit', 'graph', 'parabola',
+  'plot', 'circle', 'force_block', 'ray_diagram', 'flow_diagram',
+  'osi_layers', 'water_cycle', 'bar_chart'
+]);
+
+function parseDiagramDefinition(instructions) {
+  if (!instructions) return {};
+  try {
+    const parsed = JSON.parse(instructions);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    return { type: instructions.toLowerCase().trim() };
+  }
+}
+
+function getFlowDiagramSteps(definition) {
+  const steps = definition?.steps;
+  const kinds = new Set(['start', 'process', 'input', 'output', 'end']);
+  if (Object.keys(definition || {}).some(key => !['type', 'steps'].includes(key))) return null;
+  if (!Array.isArray(steps) || steps.length < 2 || steps.length > 6) return null;
+  if (steps[0]?.kind !== 'start' || steps[steps.length - 1]?.kind !== 'end') return null;
+  if (steps.some((step, index) => (
+    !step || typeof step.label !== 'string' || !step.label.trim() || step.label.length > 42 ||
+    !kinds.has(step.kind) || (index > 0 && index < steps.length - 1 && ['start', 'end'].includes(step.kind))
+  ))) return null;
+  return steps;
+}
+
 const CanvasDiagram = ({ instructions }) => {
   const canvasRef = useRef(null);
+  const definition = useMemo(() => parseDiagramDefinition(instructions), [instructions]);
+  const diagramType = (definition.type || '').toLowerCase().trim();
+  const flowSteps = useMemo(
+    () => diagramType === 'flow_diagram' ? getFlowDiagramSteps(definition) : null,
+    [definition, diagramType]
+  );
+  const isValidType = CANVAS_VALID_TYPES.has(diagramType) && (diagramType !== 'flow_diagram' || !!flowSteps);
 
   useEffect(() => {
+    // Only draw if type is valid AND canvas is mounted
+    if (!isValidType) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -67,13 +107,7 @@ const CanvasDiagram = ({ instructions }) => {
     ctx.lineWidth = 2.5;
     ctx.font = '16px "Caveat", cursive';
 
-    let type = '';
-    try {
-      const parsed = JSON.parse(instructions);
-      type = parsed.type;
-    } catch (e) {
-      type = instructions.toLowerCase().trim();
-    }
+    const type = diagramType;
 
     const arrow = (x1, y1, x2, y2) => {
       const angle = Math.atan2(y2 - y1, x2 - x1);
@@ -141,24 +175,29 @@ const CanvasDiagram = ({ instructions }) => {
       ctx.fillText('F', 318, 192);
 
     } else if (type === 'flow_diagram') {
-      const boxW = 160, boxH = 38, cx = 250;
-      const labels = ['START', 'Process / Input', 'Decision', 'Output', 'END'];
-      const ys = [30, 100, 175, 250, 320];
-      labels.forEach((lbl, i) => {
-        if (i === 2) {
-          // Diamond for decision
-          ctx.beginPath();
-          ctx.moveTo(cx, ys[i]); ctx.lineTo(cx + 70, ys[i] + 30);
-          ctx.lineTo(cx, ys[i] + 60); ctx.lineTo(cx - 70, ys[i] + 30);
-          ctx.closePath(); ctx.stroke();
-          ctx.fillText(lbl, cx - 28, ys[i] + 36);
+      const nodeW = 330, nodeH = 36, gap = 14, cx = 250;
+      const totalH = flowSteps.length * nodeH + (flowSteps.length - 1) * gap;
+      const firstY = (350 - totalH) / 2;
+      ctx.textAlign = 'center';
+      flowSteps.forEach((step, i) => {
+        const y = firstY + i * (nodeH + gap);
+        const left = cx - nodeW / 2;
+        ctx.beginPath();
+        if (step.kind === 'start' || step.kind === 'end') {
+          ctx.ellipse(cx, y + nodeH / 2, nodeW / 2, nodeH / 2, 0, 0, 2 * Math.PI);
+        } else if (step.kind === 'input' || step.kind === 'output') {
+          ctx.moveTo(left + 18, y); ctx.lineTo(left + nodeW, y);
+          ctx.lineTo(left + nodeW - 18, y + nodeH); ctx.lineTo(left, y + nodeH);
+          ctx.closePath();
         } else {
-          ctx.strokeRect(cx - boxW / 2, ys[i], boxW, boxH);
-          ctx.fillText(lbl, cx - ctx.measureText(lbl).width / 2, ys[i] + 25);
+          ctx.rect(left, y, nodeW, nodeH);
         }
-        if (i < labels.length - 1) {
-          const nextY = i === 2 ? ys[i] + 60 : ys[i] + boxH;
-          arrow(cx, nextY, cx, ys[i + 1]);
+        ctx.stroke();
+        ctx.fillText(step.label.trim(), cx, y + 23, nodeW - 34);
+        if (i < flowSteps.length - 1) {
+          ctx.beginPath();
+          arrow(cx, y + nodeH, cx, y + nodeH + gap - 2);
+          ctx.stroke();
         }
       });
 
@@ -210,13 +249,13 @@ const CanvasDiagram = ({ instructions }) => {
       });
       ctx.fillStyle = '#ffe699'; ctx.strokeStyle = '#ffe699';
 
-    } else {
-      ctx.strokeRect(130, 110, 240, 110);
-      ctx.fillText(instructions.substring(0, 28), 140, 170);
     }
 
     ctx.stroke();
-  }, [instructions]);
+  }, [instructions, isValidType, diagramType, flowSteps]);
+
+  // Return null for unsupported types — no canvas box rendered at all
+  if (!isValidType) return null;
 
   return (
     <div style={{ textAlign: 'center', margin: '18px 0' }}>
@@ -237,10 +276,15 @@ const CanvasDiagram = ({ instructions }) => {
 
 async function* streamEndpoint(endpoint, body, signal) {
   let resp;
+  const token = localStorage.getItem('cognilearn_token');
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
   try {
     resp = await fetch(`${API}/${endpoint}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(body),
       signal: signal 
     });
@@ -274,10 +318,14 @@ async function* streamEndpoint(endpoint, body, signal) {
         if (data === '[DONE]') return;
         try {
           const json = JSON.parse(data);
-          if (json.error) throw new Error(json.error);
+          if (json.error) {
+            const error = new Error(json.error);
+            if (json.status === 429) error.code = 'RATE_LIMITED';
+            throw error;
+          }
           if (json.text) yield json.text;
         } catch (e) {
-          if (e.message && e.message.includes('API Error')) throw e;
+          if (e.code === 'RATE_LIMITED' || (e.message && e.message.includes('API Error'))) throw e;
         }
       }
     }
@@ -304,9 +352,17 @@ const SUBJECT_SUGGESTIONS = [
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [username] = useState("Zoya Sadaf");
+  const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [nameInput, setNameInput] = useState('');
+  const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [confirmPasswordInput, setConfirmPasswordInput] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
 
   const [pastClasses, setPastClasses] = useState([]);
+  const [practiceRecords, setPracticeRecords] = useState([]);
   const [viewPastClass, setViewPastClass] = useState(null);
 
   const [started, setStarted] = useState(false);
@@ -314,10 +370,20 @@ export default function App() {
   const [topic, setTopic] = useState('');
   const [subject, setSubject] = useState('General'); // hint only
 
+  const [selectedFile, setSelectedFile] = useState(null); // { name, documentId }
+  const [selectedImage, setSelectedImage] = useState(null); // { name, imageId }
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+
+  const fileInputRef = useRef(null);
+  const imageInputRef = useRef(null);
+
   // detectedLanguage is tracked via detectedLanguageRef (used by TTS, not JSX)
 
   const [blocks, setBlocks] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamError, setStreamError] = useState('');
+  const [audioError, setAudioError] = useState('');
   const [interruption, setInterruption] = useState('');
   const [isPaused, setIsPaused] = useState(false);
   const [questionsAsked, setQuestionsAsked] = useState([]);
@@ -332,6 +398,29 @@ export default function App() {
   const abortControllerRef = useRef(null);
   const currentUtteranceRef = useRef(null);
   const currentStreamIdRef = useRef(0);
+
+  // Validate existing token on mount
+  useEffect(() => {
+    const token = localStorage.getItem('cognilearn_token');
+    if (token) {
+      fetch(`${API}/auth/me`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      .then(res => {
+        if (res.ok) return res.json();
+        throw new Error('Invalid session');
+      })
+      .then(data => {
+        setUser(data.user);
+        setIsAuthenticated(true);
+      })
+      .catch(() => {
+        localStorage.removeItem('cognilearn_token');
+        setIsAuthenticated(false);
+        setUser(null);
+      });
+    }
+  }, []);
 
   const clearSpeechCompletely = () => {
     if (currentUtteranceRef.current instanceof Audio) {
@@ -400,6 +489,7 @@ export default function App() {
       };
       
       audio.onerror = () => {
+        setAudioError('Audio playback failed. You can continue reading the lesson.');
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
         currentUtteranceRef.current = null;
@@ -408,6 +498,7 @@ export default function App() {
 
       audio.play().catch(e => {
         console.error("Audio play failed", e);
+        setAudioError('Audio playback failed. You can continue reading the lesson.');
         setAudioQueue(prev => prev.slice(1));
         setIsPlaying(false);
       });
@@ -415,11 +506,23 @@ export default function App() {
   }, [audioQueue, isPlaying, isPaused]);
 
   const fetchHistory = async () => {
+    const token = localStorage.getItem('cognilearn_token');
+    if (!token) return;
     try {
-      const res = await fetch(`${API}/history`);
+      const res = await fetch(`${API}/history`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (res.ok) {
         const data = await res.json();
-        setPastClasses(data);
+        setPastClasses(Array.isArray(data) ? data.map(item => ({
+          ...item,
+          blocks: Array.isArray(item?.blocks) ? item.blocks.filter(block => block && typeof block === 'object' && typeof block.tag === 'string') : [],
+          questionsAsked: Array.isArray(item?.questionsAsked) ? item.questionsAsked.filter(question => typeof question === 'string') : [],
+          topic: typeof item?.topic === 'string' && item.topic ? item.topic : 'Recorded lesson',
+          date: typeof item?.date === 'string' ? item.date : '',
+          subject: typeof item?.subject === 'string' ? item.subject : 'General',
+          language: typeof item?.language === 'string' ? item.language : 'en'
+        })) : []);
       }
     } catch (e) {
       console.error("Failed to fetch history from database", e);
@@ -428,8 +531,12 @@ export default function App() {
 
   const deleteHistoryItem = async (e, id) => {
     e.stopPropagation();
+    const token = localStorage.getItem('cognilearn_token');
     try {
-      await fetch(`${API}/history/${id}`, { method: 'DELETE' });
+      await fetch(`${API}/history/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       setPastClasses(prev => prev.filter(cls => cls.id !== id));
       if (viewPastClass && viewPastClass.id === id) {
         setViewPastClass(null);
@@ -439,9 +546,26 @@ export default function App() {
     }
   };
 
+  const fetchPracticeRecords = async () => {
+    const token = localStorage.getItem('cognilearn_token');
+    if (!token) return;
+    try {
+      const res = await fetch(`${API}/practice`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPracticeRecords(Array.isArray(data) ? data : []);
+      }
+    } catch (e) {
+      console.error("Failed to fetch practice records from database", e);
+    }
+  };
+
   useEffect(() => {
     if (isAuthenticated && !started) {
       fetchHistory();
+      fetchPracticeRecords();
     }
   }, [isAuthenticated, started]);
 
@@ -466,7 +590,10 @@ export default function App() {
         if (nextPaused) {
           currentUtteranceRef.current.pause();
         } else {
-          currentUtteranceRef.current.play().catch(e => console.error("Resume audio play failed", e));
+          currentUtteranceRef.current.play().catch(e => {
+            console.error("Resume audio play failed", e);
+            setAudioError('Audio playback failed. You can continue reading the lesson.');
+          });
         }
       }
       return nextPaused;
@@ -483,11 +610,9 @@ export default function App() {
     return str
       // 1. Remove [LANG] tags and language codes completely
       .replace(/\[LANG\][a-z]{0,5}(?:\[\/LANG\])?/gi, '')
-      // 2. Remove [EXPLAIN]...[/EXPLAIN] block content completely (TTS only, never UI text)
-      .replace(/\[EXPLAIN\][\s\S]*?\[\/EXPLAIN\]/gi, '')
-      // 3. Remove any remaining open/close tag markup, e.g. [POINT], [/POINT], [HEADING], etc.
+      // 2. Remove remaining open/close tag markup, e.g. [POINT], [/POINT], [HEADING], etc.
       .replace(/\[\/?\s*[A-Z1-9_-]{2,20}\s*\]/gi, '')
-      // 4. Normalize whitespace
+      // 3. Normalize whitespace
       .replace(/\s+/g, ' ')
       .trim();
   };
@@ -519,7 +644,7 @@ export default function App() {
     // ── Step 2: Main tag scanner on monotonic raw stream buffer ─────────────────
     const KNOWN_TAGS = 'HEADING|POINT|MATH|IMAGE|EXPLAIN|CODE|DIAGRAM|QUESTION|QUIZ|WARNING|SUMMARY';
     const tagRe = new RegExp(
-      `\\[(${KNOWN_TAGS})\\]([\\s\\S]*?)\\[\/\\1\\]`,
+      `\\[(${KNOWN_TAGS})\\]([\\s\\S]*?)\\[/\\1\\]`,
       'gi'
     );
 
@@ -545,14 +670,13 @@ export default function App() {
       }
 
       if (tag === 'EXPLAIN') {
-        // TTS only — never rendered on board
         const cleanText = stripSpokenText(rawContent);
-        console.log('[EXPLAIN Tag Found]:', rawContent);
-        console.log('[Sending clean text to TTS]:', cleanText);
-
         if (cleanText && streamId === currentStreamIdRef.current) {
           const id = Date.now() + Math.random();
           newTtsItems.push({ id, cleanText });
+        }
+        if (rawContent && streamId === currentStreamIdRef.current) {
+          newBlocks.push({ tag: 'EXPLAIN', content: rawContent, id: `block-${endPos}` });
         }
         continue;
       }
@@ -618,6 +742,7 @@ export default function App() {
         })
         .then(res => {
           if (streamId !== currentStreamIdRef.current) return null;
+          if (!res.ok) throw new Error(`TTS request failed (${res.status})`);
           return res.blob();
         })
         .then(blob => {
@@ -634,6 +759,7 @@ export default function App() {
         .catch(err => {
           console.error('TTS fetch failed', err);
           if (streamId === currentStreamIdRef.current) {
+            setAudioError('Audio generation failed. You can continue reading the lesson.');
             setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url: null } : item));
           }
         });
@@ -641,10 +767,78 @@ export default function App() {
     }
   }, []);
 
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError('');
+    setIsUploading(true);
+
+    const token = localStorage.getItem('cognilearn_token');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await fetch(`${API}/documents/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData
+      });
+      const data = await res.json();
+      if (res.ok && data.document_id) {
+        setSelectedFile({ name: file.name, documentId: data.document_id });
+        setSelectedImage(null);
+      } else {
+        setUploadError(data.detail || 'Failed to upload document');
+      }
+    } catch (err) {
+      setUploadError('Upload failed. Please check network connection.');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError('');
+    setIsUploading(true);
+
+    const token = localStorage.getItem('cognilearn_token');
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const res = await fetch(`${API}/images/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        },
+        body: formData
+      });
+      const data = await res.json();
+      if (res.ok && data.image_id) {
+        setSelectedImage({ name: file.name, imageId: data.image_id });
+        setSelectedFile(null);
+      } else {
+        setUploadError(data.detail || 'Failed to upload image');
+      }
+    } catch (err) {
+      setUploadError('Image upload failed. Please check connection.');
+    } finally {
+      setIsUploading(false);
+      if (imageInputRef.current) imageInputRef.current.value = '';
+    }
+  };
+
   const startSession = async () => {
-    if (!topic) return;
+    if (!topic.trim() && !selectedFile && !selectedImage) return;
     const streamId = stopCurrentStreamAndSpeech();
 
+    setStreamError('');
+    setAudioError('');
     setStarted(true);
     setViewPastClass(null);
     setIsStreaming(true);
@@ -655,16 +849,27 @@ export default function App() {
     lessonContextRef.current = ''; 
     setBlocks([]);
 
+    const payload = {
+      topic: topic.trim(),
+      subject,
+      document_id: selectedFile?.documentId || null,
+      image_id: selectedImage?.imageId || null
+    };
+
     try {
-      for await (const chunk of streamEndpoint('teach', { topic, subject }, abortControllerRef.current.signal)) {
+      for await (const chunk of streamEndpoint('teach', payload, abortControllerRef.current.signal)) {
         if (streamId !== currentStreamIdRef.current) break;
         rawBufferRef.current += chunk;
         processRaw(rawBufferRef.current, streamId);
       }
     } catch (e) {
       if (e.name !== 'AbortError' && !abortControllerRef.current?.signal?.aborted) {
-        console.error(e);
-        setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+        if (e.code === 'RATE_LIMITED') {
+          setStreamError('The tutor is busy right now. Please wait a moment, then try again.');
+        } else {
+          console.error(e);
+          setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+        }
       }
     } finally {
       if (streamId === currentStreamIdRef.current) {
@@ -679,6 +884,8 @@ export default function App() {
 
     const streamId = stopCurrentStreamAndSpeech();
 
+    setStreamError('');
+    setAudioError('');
     setIsStreaming(true);
     setIsPaused(false);
     setQuestionsAsked(prev => [...prev, question]);
@@ -697,8 +904,12 @@ export default function App() {
       }
     } catch (e) {
       if (e.name !== 'AbortError' && !abortControllerRef.current?.signal?.aborted) {
-        console.error(e);
-        setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+        if (e.code === 'RATE_LIMITED') {
+          setStreamError('The tutor is busy right now. Please wait a moment, then try again.');
+        } else {
+          console.error(e);
+          setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
+        }
       }
     } finally {
       if (streamId === currentStreamIdRef.current) {
@@ -710,21 +921,30 @@ export default function App() {
   const exitToLanding = async () => {
     stopCurrentStreamAndSpeech();
     
-    if (topic && blocks.length > 0) {
+    const lessonTitle = topic || selectedFile?.name || selectedImage?.name || "Class Session";
+    if (lessonTitle && blocks.length > 0) {
+      const token = localStorage.getItem('cognilearn_token');
       const newClass = {
         id: Date.now().toString(),
-        topic,
+        topic: lessonTitle,
         blocks,
         questionsAsked,
-        date: new Date().toLocaleString()
+        date: new Date().toLocaleString(),
+        subject,
+        language: detectedLanguageRef.current || 'en'
       };
       
       try {
-        await fetch(`${API}/history`, {
+        const response = await fetch(`${API}/history`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
           body: JSON.stringify(newClass)
         });
+        if (!response.ok) throw new Error(`History save failed (${response.status})`);
+        setPastClasses(prev => [newClass, ...prev.filter(item => item.id !== newClass.id)]);
       } catch (e) {
         console.error("Failed to save class to database", e);
       }
@@ -734,6 +954,9 @@ export default function App() {
     setIsStreaming(false);
     setIsPaused(false);
     setTopic('');
+    setSelectedFile(null);
+    setSelectedImage(null);
+    setUploadError('');
     setBlocks([]);
     setInterruption('');
     setQuestionsAsked([]);
@@ -742,13 +965,125 @@ export default function App() {
     lessonContextRef.current = ''; 
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     if (started) {
       exitToLanding();
     }
     clearSpeechCompletely();
     setViewPastClass(null);
+    const token = localStorage.getItem('cognilearn_token');
+    if (token) {
+      try {
+        await fetch(`${API}/auth/logout`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+      } catch (_) {}
+    }
+    localStorage.removeItem('cognilearn_token');
     setIsAuthenticated(false);
+    setUser(null);
+    setPastClasses([]);
+    setPracticeRecords([]);
+  };
+
+  const handleLoginSubmit = async (e) => {
+    if (e) e.preventDefault();
+    setAuthError('');
+    if (!emailInput.trim() || !passwordInput) {
+      setAuthError('Please enter email and password.');
+      return;
+    }
+    setIsAuthLoading(true);
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: emailInput.trim(), password: passwordInput })
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        localStorage.setItem('cognilearn_token', data.access_token);
+        setUser(data.user);
+        setIsAuthenticated(true);
+        setAuthError('');
+      } else {
+        setAuthError(data.detail || 'Invalid email or password');
+      }
+    } catch (err) {
+      setAuthError('Unable to connect to server');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleRegisterSubmit = async (e) => {
+    if (e) e.preventDefault();
+    setAuthError('');
+    if (!nameInput.trim() || !emailInput.trim() || !passwordInput) {
+      setAuthError('All fields are required.');
+      return;
+    }
+    if (passwordInput !== confirmPasswordInput) {
+      setAuthError('Passwords do not match.');
+      return;
+    }
+    if (passwordInput.length < 6) {
+      setAuthError('Password must be at least 6 characters.');
+      return;
+    }
+    setIsAuthLoading(true);
+    try {
+      const res = await fetch(`${API}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: nameInput.trim(),
+          email: emailInput.trim(),
+          password: passwordInput
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        localStorage.setItem('cognilearn_token', data.access_token);
+        setUser(data.user);
+        setIsAuthenticated(true);
+        setAuthError('');
+      } else {
+        setAuthError(data.detail || 'Registration failed');
+      }
+    } catch (err) {
+      setAuthError('Unable to connect to server');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleDemoLogin = async () => {
+    setEmailInput('demo@cognilearn.ai');
+    setPasswordInput('demo123');
+    setIsAuthLoading(true);
+    setAuthError('');
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'demo@cognilearn.ai', password: 'demo123' })
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        localStorage.setItem('cognilearn_token', data.access_token);
+        setUser(data.user);
+        setIsAuthenticated(true);
+        setAuthError('');
+      } else {
+        setAuthError('Demo account login failed');
+      }
+    } catch (err) {
+      setAuthError('Unable to connect to server');
+    } finally {
+      setIsAuthLoading(false);
+    }
   };
 
   if (!isAuthenticated) {
@@ -762,43 +1097,156 @@ export default function App() {
           </div>
         </header>
         <main className="login-main">
-          <div className="login-container">
-            <h2 className="welcome-header">Welcome Back</h2>
-            <p className="welcome-subtitle">sign in to access your digital chalkboard and learning history.</p>
-            
-            <div className="input-field-group">
-              <label>EMAIL ADDRESS</label>
-              <input type="email" placeholder="Enter your email" />
-            </div>
-            
-            <div className="input-field-group">
-              <label>PASSWORD</label>
-              <input type="password" placeholder="Enter your password" />
-            </div>
+          <div className={`login-container ${authMode === 'register' ? 'register-container' : ''}`}>
+            {authMode === 'login' ? (
+              <form onSubmit={handleLoginSubmit}>
+                <h2 className="welcome-header">Welcome Back</h2>
+                <p className="welcome-subtitle">Sign in to access your digital chalkboard and learning history.</p>
 
-            <div className="signin-btn-container" onClick={() => setIsAuthenticated(true)}>
-              SIGN IN
-            </div>
+                {authError && (
+                  <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px', padding: '8px 12px', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px', border: '1px solid #ef4444' }}>
+                    {authError}
+                  </div>
+                )}
+                
+                <div className="input-field-group">
+                  <label>EMAIL ADDRESS</label>
+                  <input
+                    type="email"
+                    value={emailInput}
+                    onChange={e => setEmailInput(e.target.value)}
+                    placeholder="Enter your email"
+                    required
+                  />
+                </div>
+                
+                <div className="input-field-group">
+                  <label>PASSWORD</label>
+                  <input
+                    type="password"
+                    value={passwordInput}
+                    onChange={e => setPasswordInput(e.target.value)}
+                    placeholder="Enter your password"
+                    required
+                  />
+                </div>
 
-            <div className="demo-access-text" onClick={() => setIsAuthenticated(true)}>
-              Access Demo Account
-            </div>
+                <button
+                  type="submit"
+                  className="signin-btn-container"
+                  disabled={isAuthLoading}
+                  style={{ width: '100%', border: 'none', cursor: isAuthLoading ? 'wait' : 'pointer' }}
+                >
+                  {isAuthLoading ? 'SIGNING IN...' : 'SIGN IN'}
+                </button>
 
-            <div className="create-account-text">
-              Create a new account
-            </div>
+                <div className="demo-access-text" onClick={handleDemoLogin} style={{ cursor: 'pointer' }}>
+                  Access Demo Account
+                </div>
+
+                <div
+                  className="create-account-text"
+                  onClick={() => { setAuthMode('register'); setAuthError(''); }}
+                  style={{ cursor: 'pointer' }}
+                >
+                  Need an account? Create a new account
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleRegisterSubmit}>
+                <h2 className="welcome-header">Create Account</h2>
+                <p className="welcome-subtitle">Sign up to start your personalized AI tutoring experience.</p>
+
+                {authError && (
+                  <div style={{ color: '#f87171', fontSize: '13px', marginBottom: '12px', padding: '8px 12px', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px', border: '1px solid #ef4444' }}>
+                    {authError}
+                  </div>
+                )}
+                
+                <div className="input-field-group">
+                  <label>FULL NAME</label>
+                  <input
+                    type="text"
+                    value={nameInput}
+                    onChange={e => setNameInput(e.target.value)}
+                    placeholder="Enter your full name"
+                    required
+                  />
+                </div>
+
+                <div className="input-field-group">
+                  <label>EMAIL ADDRESS</label>
+                  <input
+                    type="email"
+                    value={emailInput}
+                    onChange={e => setEmailInput(e.target.value)}
+                    placeholder="Enter your email"
+                    required
+                  />
+                </div>
+                
+                <div className="input-field-group">
+                  <label>PASSWORD</label>
+                  <input
+                    type="password"
+                    value={passwordInput}
+                    onChange={e => setPasswordInput(e.target.value)}
+                    placeholder="Create a password (min 6 characters)"
+                    required
+                  />
+                </div>
+
+                <div className="input-field-group">
+                  <label>CONFIRM PASSWORD</label>
+                  <input
+                    type="password"
+                    value={confirmPasswordInput}
+                    onChange={e => setConfirmPasswordInput(e.target.value)}
+                    placeholder="Confirm your password"
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="signin-btn-container"
+                  disabled={isAuthLoading}
+                  style={{ width: '100%', border: 'none', cursor: isAuthLoading ? 'wait' : 'pointer' }}
+                >
+                  {isAuthLoading ? 'CREATING ACCOUNT...' : 'CREATE ACCOUNT'}
+                </button>
+
+                <div
+                  className="create-account-text"
+                  onClick={() => { setAuthMode('login'); setAuthError(''); }}
+                  style={{ cursor: 'pointer' }}
+                >
+                  Already have an account? Sign In
+                </div>
+              </form>
+            )}
           </div>
         </main>
-        <footer className="login-footer">
-          &copy; 2026 AI Tutor - Vintage Chalkboard Simulation. All rights reserved.
-        </footer>
       </div>
+    );
+  }
+
+  // ── Exclusive Admin Routing ───────────────────────────────────────────────────
+  // If the logged-in account has role === 'admin', show ONLY the Admin Dashboard.
+  // The admin does NOT see student teaching controls, classroom studio, or practice.
+  if (user?.role === 'admin') {
+    return (
+      <AdminDashboard
+        user={user}
+        token={localStorage.getItem('cognilearn_token')}
+        onLogout={handleLogout}
+      />
     );
   }
 
   const showHeader = !started || viewPastClass;
 
-  const renderBlock = (step) => {
+  const renderBlock = (step, includeExplanation = false) => {
     // Final-defence sanitiser: strip any leftover tag text that
     // somehow survived the processRaw pass before it hits the DOM.
     const safe = (str) => stripAllTags(str);
@@ -811,11 +1259,20 @@ export default function App() {
           <span className="point-text-content">{safe(step.content)}</span>
         </div>
       );
-      case 'MATH': return (
-        <div className="rendered-math-container">
-          <BlockMath math={step.content} />
-        </div>
-      );
+      case 'EXPLAIN': return includeExplanation
+        ? <div className="recorded-explanation"><strong>Explanation</strong><div>{safe(step.content)}</div></div>
+        : null;
+      case 'MATH': {
+        try {
+          return (
+            <div className="rendered-math-container">
+              <BlockMath math={step.content} />
+            </div>
+          );
+        } catch (e) {
+          return <div className="rendered-warning">⚠️ Math rendering error</div>;
+        }
+      }
       case 'IMAGE': return (
         <div className="rendered-media-frame">
           <VisualImage query={safe(step.content)} />
@@ -829,6 +1286,7 @@ export default function App() {
       );
       case 'WARNING': return <div className="rendered-warning">⚠️ {safe(step.content)}</div>;
       case 'QUESTION': return <div className="rendered-question">❓ {safe(step.content)}</div>;
+      case 'QUIZ': return null; // Quiz blocks handled separately by PracticeQuizzesPage
       // SUMMARY header row (content is empty — points are rendered as individual POINT blocks)
       case 'SUMMARY': return step.content
         ? <div className="rendered-summary">📌 {safe(step.content)}</div>
@@ -851,9 +1309,9 @@ export default function App() {
             <button 
               onClick={() => setActiveTab('classroom')}
               style={{
-                backgroundColor: activeTab === 'classroom' ? '#059669' : 'transparent',
-                color: activeTab === 'classroom' ? '#ffffff' : '#9ca3af',
-                border: '1px solid #374151',
+                backgroundColor: activeTab === 'classroom' ? '#f59e0b' : 'transparent',
+                color: activeTab === 'classroom' ? '#111111' : '#9ca3af',
+                border: activeTab === 'classroom' ? '1px solid #f59e0b' : '1px solid #374151',
                 borderRadius: '6px',
                 padding: '6px 14px',
                 fontSize: '13px',
@@ -866,9 +1324,9 @@ export default function App() {
             <button 
               onClick={() => setActiveTab('practice')}
               style={{
-                backgroundColor: activeTab === 'practice' ? '#0284c7' : 'transparent',
-                color: activeTab === 'practice' ? '#ffffff' : '#9ca3af',
-                border: '1px solid #374151',
+                backgroundColor: activeTab === 'practice' ? '#f59e0b' : 'transparent',
+                color: activeTab === 'practice' ? '#111111' : '#9ca3af',
+                border: activeTab === 'practice' ? '1px solid #f59e0b' : '1px solid #374151',
                 borderRadius: '6px',
                 padding: '6px 14px',
                 fontSize: '13px',
@@ -878,21 +1336,62 @@ export default function App() {
             >
               Practice & Quizzes
             </button>
+            {user?.role === 'admin' && (
+              <button 
+                onClick={() => setActiveTab('admin')}
+                style={{
+                  backgroundColor: activeTab === 'admin' ? '#f59e0b' : 'rgba(245, 158, 11, 0.15)',
+                  color: activeTab === 'admin' ? '#111111' : '#f59e0b',
+                  border: '1px solid #f59e0b',
+                  borderRadius: '6px',
+                  padding: '6px 14px',
+                  fontSize: '13px',
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <span>🛡️</span> Admin Dashboard
+              </button>
+            )}
           </div>
 
-          <div className="user-profile-area">
-            <span className="logged-in-text">logged in as <span className="username-text">{username}</span></span>
-            <button className="signout-btn" onClick={handleLogout}>SIGN OUT</button>
+          <div className="user-profile-area" style={{ position: 'relative' }}>
+            <UserProfileDropdown
+              user={user}
+              pastClasses={pastClasses}
+              practiceRecords={practiceRecords}
+              onLogout={handleLogout}
+              onRefresh={() => {
+                fetchHistory();
+                fetchPracticeRecords();
+              }}
+            />
           </div>
         </header>
       )}
 
       <div className="app-workspace">
+        {activeTab === 'admin' && (
+          <div style={{ flex: 1, overflowY: 'auto', width: '100%' }}>
+            <AdminDashboard
+              user={user}
+              token={localStorage.getItem('cognilearn_token')}
+              onLogout={handleLogout}
+              onNavigateClassroom={() => setActiveTab('classroom')}
+            />
+          </div>
+        )}
+
         {activeTab === 'practice' && !started && !viewPastClass ? (
           <div style={{ flex: 1, overflowY: 'auto' }}>
             <PracticeQuizzesPage
               activeTopic={topic}
               activeSubject={subject}
+              activeLanguage={detectedLanguageRef.current || 'English'}
+              documentId={selectedFile?.documentId}
               onStartLesson={(newTopic, newSubject) => {
                 setTopic(newTopic);
                 if (newSubject) setSubject(newSubject);
@@ -900,6 +1399,7 @@ export default function App() {
                 startSession();
               }}
               onReturnDashboard={() => setActiveTab('classroom')}
+              onPracticeCompleted={() => fetchPracticeRecords()}
             />
           </div>
         ) : null}
@@ -916,15 +1416,17 @@ export default function App() {
                 <div className="status-meta-card">
                   <div className="meta-card-label">RECORDING PLAYBACK</div>
                   <div className="meta-card-value">{viewPastClass.topic}</div>
+                  <div className="meta-card-label" style={{marginTop: '12px'}}>SUBJECT · LANGUAGE</div>
+                  <div className="meta-card-value" style={{fontSize: '13px', color: '#a5c7b0'}}>{viewPastClass.subject || 'General'} · {viewPastClass.language || 'en'}</div>
                   <div className="meta-card-label" style={{marginTop: '12px'}}>DATE RECORDED</div>
                   <div className="meta-card-value" style={{fontSize: '13px', color: '#a5c7b0'}}>{viewPastClass.date}</div>
                 </div>
 
-                {viewPastClass.questionsAsked.length > 0 && (
+                {(viewPastClass.questionsAsked || []).length > 0 && (
                   <div className="status-meta-card">
                     <div className="meta-card-label">QUESTIONS ASKED:</div>
                     <div className="questions-history-log">
-                      {viewPastClass.questionsAsked.map((q, idx) => (
+                      {(viewPastClass.questionsAsked || []).map((q, idx) => (
                         <div key={idx} className="logged-question-bubble">"{q}"</div>
                       ))}
                     </div>
@@ -935,9 +1437,9 @@ export default function App() {
 
             <div className="classroom-main-board" ref={scrollRef}>
               <div className="board-scrollable-container">
-                {viewPastClass.blocks.map((step) => (
-                  <div key={step.id} className="board-render-element">
-                    {renderBlock(step)}
+                {(Array.isArray(viewPastClass.blocks) ? viewPastClass.blocks : []).map((step, index) => (
+                  <div key={step.id || index} className="board-render-element">
+                    {renderBlock(step, true)}
                   </div>
                 ))}
               </div>
@@ -973,36 +1475,170 @@ export default function App() {
             </div>
 
             <div className="classroom-main-board" style={{display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
-              <div className="landing-card">
-                  <h1 className="main-title">Start a New Class 🎓</h1>
-                  <p className="main-subtitle">Select a subject and enter any complex topic, math formula, or coding concept to begin your live session.</p>
-                  
-                  <div style={{ marginBottom: '10px' }}>
-                      <label style={{ fontSize: '11px', color: 'rgba(255,230,153,0.6)', textTransform: 'uppercase', letterSpacing: '1px', display: 'block', marginBottom: '6px' }}>
-                        Subject Hint <span style={{ fontWeight: 'normal', opacity: 0.6 }}>(optional — AI auto-detects from your question)</span>
-                      </label>
-                      <select
-                          className="subject-dropdown"
-                          value={subject}
-                          onChange={(e) => setSubject(e.target.value)}
-                      >
-                          {SUBJECT_SUGGESTIONS.map(sub => (
-                              <option key={sub} value={sub}>{sub}</option>
-                          ))}
-                      </select>
+              <div className="landing-card" style={{ maxWidth: '640px', width: '92%' }}>
+                <h1 className="main-title" style={{ marginBottom: '18px' }}>What would you like to learn?</h1>
+                
+                <div style={{ marginBottom: '14px' }}>
+                  <input
+                    value={topic}
+                    onChange={e => setTopic(e.target.value)}
+                    placeholder="Enter a topic or question..."
+                    onKeyPress={e => e.key === 'Enter' && startSession()}
+                    autoFocus
+                    style={{
+                      width: '100%',
+                      padding: '14px 16px',
+                      borderRadius: '8px',
+                      backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                      border: '1px solid rgba(255, 230, 153, 0.3)',
+                      color: '#ffffff',
+                      fontSize: '15px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '14px' }}>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                    accept=".pdf,.docx,.doc,.pptx,.ppt,.txt,.md"
+                    style={{ display: 'none' }}
+                  />
+                  <input
+                    type="file"
+                    ref={imageInputRef}
+                    onChange={handleImageUpload}
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                  />
+
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploading}
+                    style={{
+                      flex: 1,
+                      padding: '10px 14px',
+                      borderRadius: '6px',
+                      backgroundColor: 'rgba(255, 230, 153, 0.08)',
+                      border: '1px solid rgba(255, 230, 153, 0.3)',
+                      color: '#ffe699',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      cursor: isUploading ? 'wait' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px'
+                    }}
+                  >
+                    <span>📄</span> {isUploading ? 'Uploading...' : 'Upload File'}
+                  </button>
+
+                  <button
+                    onClick={() => imageInputRef.current?.click()}
+                    disabled={isUploading}
+                    style={{
+                      flex: 1,
+                      padding: '10px 14px',
+                      borderRadius: '6px',
+                      backgroundColor: 'rgba(255, 230, 153, 0.08)',
+                      border: '1px solid rgba(255, 230, 153, 0.3)',
+                      color: '#ffe699',
+                      fontSize: '13px',
+                      fontWeight: '600',
+                      cursor: isUploading ? 'wait' : 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px'
+                    }}
+                  >
+                    <span>🖼️</span> {isUploading ? 'Uploading...' : 'Upload Image'}
+                  </button>
+                </div>
+
+                {(selectedFile || selectedImage) && (
+                  <div style={{
+                    margin: '12px 0 16px 0',
+                    padding: '10px 14px',
+                    backgroundColor: 'rgba(34, 197, 94, 0.12)',
+                    border: '1px solid rgba(34, 197, 94, 0.4)',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    color: '#4ade80',
+                    fontSize: '13px'
+                  }}>
+                    <span>
+                      ✓ {selectedFile ? selectedFile.name : selectedImage.name}
+                    </span>
+                    <button
+                      onClick={() => { setSelectedFile(null); setSelectedImage(null); }}
+                      style={{
+                        backgroundColor: 'transparent',
+                        border: 'none',
+                        color: '#f87171',
+                        fontWeight: 'bold',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        padding: '2px 8px'
+                      }}
+                    >
+                      [Remove]
+                    </button>
+                  </div>
+                )}
+
+                {uploadError && (
+                  <div style={{
+                    color: '#f87171',
+                    fontSize: '12px',
+                    marginBottom: '12px',
+                    padding: '8px 12px',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderRadius: '6px',
+                    border: '1px solid #ef4444'
+                  }}>
+                    {uploadError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center', marginTop: '16px' }}>
+                  <div style={{ flex: 1 }}>
+                    <select
+                      className="subject-dropdown"
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                      style={{ width: '100%', padding: '10px 12px', fontSize: '13px' }}
+                    >
+                      {SUBJECT_SUGGESTIONS.map(sub => (
+                        <option key={sub} value={sub}>{sub}</option>
+                      ))}
+                    </select>
                   </div>
 
-                  <div className="topic-input-wrapper" style={{ marginTop: '12px' }}>
-                      <input
-                          value={topic}
-                          onChange={e => setTopic(e.target.value)}
-                          placeholder="Ask any academic question or enter a topic..."
-                          onKeyPress={e => e.key === 'Enter' && startSession()}
-                          autoFocus
-                      />
-                      <button onClick={startSession} disabled={!topic}>Teach Me</button>
-                      <button onClick={() => setActiveTab('practice')} style={{ backgroundColor: '#0284c7' }}>Practice Mode</button>
-                  </div>
+                  <button
+                    onClick={startSession}
+                    disabled={!topic.trim() && !selectedFile && !selectedImage}
+                    style={{
+                      padding: '12px 24px',
+                      backgroundColor: (!topic.trim() && !selectedFile && !selectedImage) ? '#374151' : '#f59e0b',
+                      color: (!topic.trim() && !selectedFile && !selectedImage) ? '#9ca3af' : '#111111',
+                      border: 'none',
+                      borderRadius: '6px',
+                      fontWeight: 'bold',
+                      fontSize: '14px',
+                      cursor: (!topic.trim() && !selectedFile && !selectedImage) ? 'not-allowed' : 'pointer',
+                      boxShadow: (!topic.trim() && !selectedFile && !selectedImage) ? 'none' : '0 4px 12px rgba(245, 158, 11, 0.3)'
+                    }}
+                  >
+                    Start Teaching
+                  </button>
+                </div>
               </div>
             </div>
           </>
@@ -1034,6 +1670,17 @@ export default function App() {
                 </div>
               </div>
 
+              {streamError && (
+                <div role="alert" style={{ margin: '12px', padding: '10px 12px', borderRadius: '8px', background: 'rgba(255, 193, 7, 0.12)', color: '#ffe6a1' }}>
+                  {streamError}
+                </div>
+              )}
+              {audioError && (
+                <div role="status" style={{ margin: '12px', padding: '10px 12px', borderRadius: '8px', background: 'rgba(255, 193, 7, 0.12)', color: '#ffe6a1' }}>
+                  {audioError}
+                </div>
+              )}
+
               <div className="sidebar-bottom-controls">
                 <button className="voice-toggle-btn" onClick={togglePause}>
                   {isPaused ? '▶ Resume Voice' : '⏸ Pause Voice'}
@@ -1057,8 +1704,9 @@ export default function App() {
                   {blocks.map((step) => (
                     <motion.div 
                       key={step.id}
-                      initial={{ opacity: 0, y: 12 }}
+                      initial={{ opacity: 0, y: 8 }}
                       animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.25, ease: 'easeOut' }}
                       className="board-render-element"
                     >
                       {renderBlock(step)}
