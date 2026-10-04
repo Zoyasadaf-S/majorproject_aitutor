@@ -985,9 +985,14 @@ export default function App() {
       { role: "user", content: `Teach me about: ${topic}` },
       { role: "assistant", content: rawBufferRef.current }
     ];
+    const completedLessonBlocks = [...rawBufferRef.current.matchAll(/\[(HEADING|POINT|EXPLAIN|MATH|CODE|DIAGRAM|QUESTION|WARNING|SUMMARY)\]([\s\S]*?)\[\/\1\]/gi)];
+    const latestBlock = completedLessonBlocks[completedLessonBlocks.length - 1];
+    const resumePoint = latestBlock
+      ? `Last completed block [${latestBlock[1].toUpperCase()}]: ${latestBlock[2].trim().slice(0, 1200)}. Continue with the next uncovered lesson point.`
+      : 'The lesson stream has started; infer the next uncovered point from the lesson history.';
 
     try {
-      for await (const chunk of streamEndpoint('interrupt', { topic, history, question, subject }, abortControllerRef.current.signal)) {
+      for await (const chunk of streamEndpoint('interrupt', { topic, history, question, subject, resume_point: resumePoint }, abortControllerRef.current.signal)) {
         if (streamId !== currentStreamIdRef.current) break;
         rawBufferRef.current += chunk;
         processRaw(rawBufferRef.current, streamId);

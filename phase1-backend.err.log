@@ -1,8 +1,26 @@
-INFO:     Will watch for changes in these directories: ['C:\\Users\\zoyaz\\OneDrive\\Desktop\\hackathon\\ai_tutorfull\\AI_tutor\\backend']
-INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
-INFO:     Started reloader process [19448] using StatReload
-INFO:     Started server process [24144]
-INFO:     Waiting for application startup.
-INFO:     Application startup complete.
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights:  25%|##5       | 26/103 [00:00<00:00, 246.07it/s]Loading weights: 100%|##########| 103/103 [00:00<00:00, 865.08it/s]
+Error processing line 1 of C:\Users\zoyaz\OneDrive\Desktop\ai_tutorfull\AI_tutor\backend\venv\Lib\site-packages\distutils-precedence.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 186, in addpackage
+    File "<string>", line 1, in <module>
+  AttributeError: module '_distutils_hack' has no attribute 'add_shim'
+
+Remainder of file ignored
+Error processing line 1 of C:\Users\zoyaz\OneDrive\Desktop\ai_tutorfull\AI_tutor\backend\venv\Lib\site-packages\distutils-precedence.pth:
+
+  Traceback (most recent call last):
+    File "<frozen site>", line 186, in addpackage
+    File "<string>", line 1, in <module>
+  AttributeError: module '_distutils_hack' has no attribute 'add_shim'
+
+Remainder of file ignored
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 148, in _get_module_details
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "C:\Users\zoyaz\OneDrive\Desktop\ai_tutorfull\AI_tutor\backend\venv\Lib\site-packages\uvicorn\__init__.py", line 2, in <module>
+    from uvicorn.main import Server, main, run
+  File "C:\Users\zoyaz\OneDrive\Desktop\ai_tutorfull\AI_tutor\backend\venv\Lib\site-packages\uvicorn\main.py", line 35, in <module>
+    LEVEL_CHOICES = click.Choice(list(LOG_LEVELS.keys()))
+                    ^^^^^^^^^^^^
+AttributeError: module 'click' has no attribute 'Choice'
