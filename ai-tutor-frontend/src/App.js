@@ -1065,21 +1065,52 @@ export default function App() {
       if (result.status !== 'success' || !Array.isArray(result.blocks)) {
         throw new Error('The tutor returned an invalid lesson continuation.');
       }
-      const responseBlocks = result.blocks
-        .filter(block => block && typeof block.text === 'string' && block.text.trim())
-        .map((block, index) => ({ id: block.id || `resumed_${index}`, text: block.text.trim() }));
-      if (responseBlocks.length === 0) throw new Error('The tutor returned no spoken continuation.');
 
-      // Feed the JSON response through the existing lesson parser so it updates the
-      // board and enqueues TTS blocks, which auto-play as soon as audio is ready.
-      const taggedResponse = responseBlocks.map(block => `[EXPLAIN]${block.text}[/EXPLAIN]`).join('');
-      const newBuffer = rawBufferRef.current + taggedResponse;
+      // BUG 2+3+7 FIX: Backend now returns structured {id, tag, content} blocks.
+      // Each block must be injected with its CORRECT tag — not all wrapped as [EXPLAIN].
+      // MATH blocks must go through [MATH]...[/MATH] so processRaw renders them visually.
+      // Only EXPLAIN blocks get sent to TTS by processRaw.
+      const responseBlocks = result.blocks.filter(
+        block => block && block.id && block.tag && typeof block.content === 'string'
+      );
+
+      // BUG 5 FIX: Fall back to legacy {id, text} format if backend is old
+      const legacyBlocks = result.blocks.filter(
+        block => block && block.id && typeof block.text === 'string' && block.text.trim() &&
+                 !block.tag  // only use legacy format if tag field is missing
+      );
+
+      if (responseBlocks.length === 0 && legacyBlocks.length === 0) {
+        throw new Error('The tutor returned no spoken continuation.');
+      }
+
+      // Build tagged strings for rawBufferRef injection.
+      // Each block uses its own tag — preserving the MATH/EXPLAIN distinction (BUG 3 FIX).
+      let taggedResponse = '';
       let blockEnd = rawBufferRef.current.length;
-      responseBlocks.forEach(block => {
-        blockEnd += `[EXPLAIN]${block.text}[/EXPLAIN]`.length;
-        resumedBlockIdsByEndPosRef.current.set(blockEnd, block.id);
-      });
-      rawBufferRef.current = newBuffer;
+
+      if (responseBlocks.length > 0) {
+        // New structured format from updated backend
+        responseBlocks.forEach(block => {
+          const tag = block.tag.toUpperCase();
+          const taggedStr = `[${tag}]${block.content}[/${tag}]`;
+          taggedResponse += taggedStr;
+          blockEnd += taggedStr.length;
+          // BUG 1 FIX: IDs come from backend as resume_<ts>_<uuid>_<idx> — globally unique
+          resumedBlockIdsByEndPosRef.current.set(blockEnd, block.id);
+        });
+      } else {
+        // Legacy fallback: wrap all as EXPLAIN (old backend behaviour)
+        legacyBlocks.forEach((block, index) => {
+          const safeId = block.id || `resumed_${Date.now()}_${index}`;
+          const taggedStr = `[EXPLAIN]${block.text.trim()}[/EXPLAIN]`;
+          taggedResponse += taggedStr;
+          blockEnd += taggedStr.length;
+          resumedBlockIdsByEndPosRef.current.set(blockEnd, safeId);
+        });
+      }
+
+      rawBufferRef.current = rawBufferRef.current + taggedResponse;
       processRaw(rawBufferRef.current, streamId);
     } catch (e) {
       if (e.name !== 'AbortError' && !abortControllerRef.current?.signal?.aborted) {
@@ -1174,6 +1205,9 @@ export default function App() {
     setUser(null);
     setPastClasses([]);
     setPracticeRecords([]);
+    setPasswordInput('');
+    setConfirmPasswordInput('');
+    setAuthError('');
   };
 
   const handleLoginSubmit = async (e) => {
@@ -1196,6 +1230,7 @@ export default function App() {
         setUser(data.user);
         setIsAuthenticated(true);
         setAuthError('');
+        setPasswordInput('');
       } else {
         setAuthError(data.detail || 'Invalid email or password');
       }
@@ -1238,6 +1273,8 @@ export default function App() {
         setUser(data.user);
         setIsAuthenticated(true);
         setAuthError('');
+        setPasswordInput('');
+        setConfirmPasswordInput('');
       } else {
         setAuthError(data.detail || 'Registration failed');
       }

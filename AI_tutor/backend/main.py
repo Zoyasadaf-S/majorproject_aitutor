@@ -1192,40 +1192,60 @@ INSTRUCTIONS FOR TEACHER:
         media_type="text/event-stream"
     )
 
-# ── /api/interrupt ────────────────────────────────────────────────────────────
+# -- /api/interrupt ----------------------------------------------------------
 @app.post("/api/interrupt")
 async def interrupt_lesson(req: InterruptRequest, raw_request: Request):
     user_query = (req.user_query or req.question or "").strip()
     if not user_query:
         raise HTTPException(status_code=422, detail="user_query is required.")
 
-    remaining_content = "\n".join(
-        f"[{block.get('tag', 'EXPLAIN')}] {block.get('content', '')}" if block.get("tag") else block.get("content", "")
-        for block in req.remaining_blocks
-        if block.get("content", "").strip()
-    )
+    # Build structured remaining content preserving all teaching tags (BUG 5 FIX)
+    remaining_lines_list = []
+    for blk in req.remaining_blocks:
+        blk_tag = blk.get("tag", "EXPLAIN")
+        blk_content = blk.get("content", "").strip()
+        if blk_content:
+            remaining_lines_list.append(f"[{blk_tag}]{blk_content}[/{blk_tag}]")
+    remaining_content = "\n".join(remaining_lines_list)
     if not remaining_content:
         remaining_content = req.resume_point or "Continue from the next uncovered point in the lesson history."
 
-    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + f"""
+    topic_str = req.topic
+    user_query_str = user_query
 
-You are an active live teacher presenting a lesson on '{req.topic}'. The student just
-interrupted you mid-explanation with: '{user_query}'
+    interrupt_addendum = (
+        "\n\n"
+        "======================================================\n"
+        "INTERRUPTION HANDLING - STRUCTURED TAG PROTOCOL (CRITICAL)\n"
+        "======================================================\n"
+        f"You are an active live teacher presenting a lesson on \'{topic_str}\'.\n"
+        f"The student just interrupted you mid-explanation with: \'{user_query_str}\'\n"
+        "\n"
+        "CRITICAL OUTPUT FORMAT RULE:\n"
+        "- You MUST use the EXACT same structured tag protocol as the main lesson.\n"
+        "- You MUST begin with [LANG]<code>[/LANG].\n"
+        "- Answer the interruption using [EXPLAIN] blocks for spoken text.\n"
+        "- Resume the lesson using tags: [HEADING], [POINT], [MATH], [EXPLAIN], [CODE], [WARNING], etc.\n"
+        "- [MATH] is VISUAL-ONLY (chalkboard). NEVER put LaTeX inside [EXPLAIN].\n"
+        "- [EXPLAIN] is spoken via TTS. NEVER put LaTeX or math notation inside [EXPLAIN].\n"
+        "- NEVER write plain paragraphs without tags.\n"
+        "\n"
+        "STEP 1 - Answer the interruption in 1-3 [EXPLAIN] blocks. Be concise.\n"
+        "STEP 2 - Write a brief transition [EXPLAIN] block to bridge back to the lesson.\n"
+        "STEP 3 - Continue from REMAINING LESSON CONTENT only. Do NOT restart or repeat.\n"
+        "\n"
+        "REMAINING LESSON CONTENT (continue from ONLY these, in order):\n"
+        + remaining_content +
+        "\n\n"
+        "STRICT RULES:\n"
+        "- Do NOT re-explain concepts already covered.\n"
+        "- Do NOT restart the lesson from the beginning.\n"
+        "- Do NOT repeat previous headings, points, or explanations.\n"
+        "- Pair every [MATH] with a separate [EXPLAIN] describing it in plain spoken words.\n"
+        "- NEVER put backslashes or LaTeX commands inside [EXPLAIN].\n"
+    )
 
-INSTRUCTIONS:
-1. Answer the student's interruption directly, accurately, and concisely.
-2. Provide a natural teacher voice transition (for example, 'Now, returning to where we
-   paused...').
-3. Directly attach and continue explaining the lesson using the next remaining content:
-'{remaining_content}'
-
-RULES:
-- Preserve the established core subject teaching methodology and pedagogical tone.
-- Do NOT re-explain or repeat concepts covered before the interrupt point.
-- Deliver the answer, bridge, and continuation in a single unified response separated by
-  double newlines (\\n\\n).
-- For this endpoint, write natural spoken paragraphs without machine-readable tag wrappers.
-"""
+    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + interrupt_addendum
 
     recent_history = req.history[-6:] if len(req.history) > 6 else req.history
 
@@ -1233,23 +1253,46 @@ RULES:
         {
             "role": "user",
             "content": (
+                f"Student interrupted: {user_query}\n"
                 f"Last completed lesson block ID: {req.last_completed_block_id or 'unknown'}\n"
-                f"The next uncovered lesson content is supplied in the active teacher instructions. "
-                f"Respond with the interruption answer, a brief spoken bridge, and the lesson continuation."
+                "Answer the interruption using structured tags ([EXPLAIN], [POINT], [MATH], etc.), "
+                "then resume the lesson ONLY from the remaining content in your instructions."
             )
         }
     ]
     completion = await complete_groq(messages, interrupt_system)
-    plain_text = re.sub(r"\[LANG\][a-z]{2}\[/LANG\]", "", completion, flags=re.IGNORECASE)
-    plain_text = re.sub(r"\[/?(?:HEADING|POINT|EXPLAIN|IMAGE|DIAGRAM|MATH|CODE|QUESTION|QUIZ|WARNING|SUMMARY)\]", "", plain_text, flags=re.IGNORECASE)
-    plain_text = plain_text.replace("\r\n", "\n")
-    paragraphs = [part.strip() for part in plain_text.split("\n\n") if part.strip()]
-    if not paragraphs:
+
+    # BUG 1+2 FIX: Parse the structured tag response into individual blocks with unique UUIDs.
+    # Do NOT strip tags. Parse exactly like the frontend processRaw does.
+    KNOWN_TAGS_PAT = r'HEADING|POINT|MATH|IMAGE|EXPLAIN|CODE|DIAGRAM|QUESTION|QUIZ|WARNING|SUMMARY'
+    tag_re_interrupt = re.compile(
+        rf'\[({KNOWN_TAGS_PAT})\]([\s\S]*?)\[/\1\]',
+        re.IGNORECASE
+    )
+
+    structured_blocks = []
+    ts = int(datetime.utcnow().timestamp() * 1000)
+    for idx, m in enumerate(tag_re_interrupt.finditer(completion)):
+        blk_tag = m.group(1).upper()
+        blk_content = m.group(2).strip()
+        if not blk_content and blk_tag != "DIAGRAM":
+            continue
+        # BUG 1 FIX: Use timestamp + uuid hex + index for guaranteed global uniqueness
+        block_id = f"resume_{ts}_{uuid.uuid4().hex[:8]}_{idx}"
+        structured_blocks.append({"id": block_id, "tag": blk_tag, "content": blk_content})
+
+    # Fallback: if model returned no tags at all, wrap entire response as EXPLAIN
+    if not structured_blocks:
+        cleaned = re.sub(r'\[LANG\][a-z]{0,5}(?:\[/LANG\])?', '', completion, flags=re.IGNORECASE).strip()
+        if cleaned:
+            block_id = f"resume_{ts}_{uuid.uuid4().hex[:8]}_0"
+            structured_blocks.append({"id": block_id, "tag": "EXPLAIN", "content": cleaned})
+
+    if not structured_blocks:
         raise HTTPException(status_code=502, detail="LLM returned no usable interruption response.")
-    return {
-        "status": "success",
-        "blocks": [{"id": f"resumed_{index}", "text": text} for index, text in enumerate(paragraphs)]
-    }
+
+    return {"status": "success", "blocks": structured_blocks}
+
 
 # ── /api/image ────────────────────────────────────────────────────────────────
 # Fetches a REAL image from Wikimedia Commons → Wikipedia → Unsplash.
