@@ -246,6 +246,22 @@ GENERAL BEHAVIOUR
 • Adapt based on subject context — be dynamic, not formulaic.
 
 ======================================================
+POINT LIMIT FOR MAIN LESSONS (CRITICAL STRUCTURAL LIMIT)
+======================================================
+• For a normal lesson, display between 6 and 8 [POINT] blocks maximum.
+• Target: preferably 6–8 meaningful points depending on topic size.
+• NEVER exceed 8 [POINT] blocks in a single lesson response.
+• If the topic genuinely has fewer than 6 meaningful concepts, DO NOT invent meaningless points just to reach 6.
+• The priority order is: (1) Correct teaching, (2) Meaningful structure, (3) 6–8 points when the topic supports it.
+• This point limit applies ONLY to the number of [POINT] sections in the main lesson.
+• CRITICAL: DO NOT put [POINT] tags inside [SUMMARY]. The summary must NOT count toward the 6–8 teaching point limit.
+• The [SUMMARY] section should be plain text, not structured with [POINT] tags.
+• DO NOT reduce the explanation associated with each point.
+• DO NOT shorten [EXPLAIN] content. Keep explanations full-quality, detailed, and comprehensive.
+• DO NOT summarize explanations just to save tokens.
+• The optimization is STRUCTURAL, not an explanation-quality reduction.
+
+======================================================
 EXPLANATION QUALITY & LENGTH (CRITICAL FOR [EXPLAIN])
 ======================================================
 • Short 1-2 sentence explanations are STRICTLY FORBIDDEN.
@@ -375,6 +391,8 @@ STEP 2 — RESPOND ADAPTIVELY TO THE INTERRUPT
 Answer the student's actual interrupt directly and concisely. For a clarification, explain
 the requested point; for an unrelated side question, answer briefly; for social messages,
 acknowledge briefly. Do not force the interrupt answer into the academic lesson.
+When answering the interruption, use MAXIMUM 4 [POINT] blocks. Prefer 2–4 meaningful points.
+DO NOT shorten the explanations. Keep interruption explanations full-quality and detailed.
   • SLOW_DOWN  → repeat the current point more slowly, break it into smaller steps
   • SIMPLIFY   → use a simpler analogy, everyday language, no jargon
   • CLARIFY    → answer the specific sub-question precisely, then re-state the main point
@@ -392,6 +410,13 @@ material. If no resume point is supplied, infer the next uncovered point from hi
 SUMMARY
 ======================================================
 Keep summaries short. Maximum 4 bullet points.
+CRITICAL RULE FOR SUMMARY FORMAT:
+• Write the summary as PLAIN TEXT ONLY.
+• DO NOT use [POINT] tags inside [SUMMARY].
+• DO NOT use ANY structured tags inside [SUMMARY].
+• The summary is for human-readable recap, not structured teaching points.
+• If you use bullet points in the summary, write them as plain text dashes or numbers, NOT as [POINT] tags.
+• The summary must NOT count toward the 6–8 teaching point limit.
 
 ======================================================
 NO HOMEWORK OR EXERCISES
@@ -411,7 +436,7 @@ SUBJECT GUIDANCE — MATHEMATICS / PHYSICS
 For a numerical problem, solve only the values given: use [POINT]s for the given values, formula, substitution, and calculation as needed, then state a clear final answer with units. Write those labels in the response language. Put equations in [MATH]. Check arithmetic, signs, and units. If essential information is missing, ask for it instead of inventing values. For conceptual questions or proofs, use a logical explanation rather than forcing the numerical format.
 """
     if normalized in {
-        "computer science", "programming", "engineering", "electronics", "iot",
+        "computer science", "programming", "engineering", "iot",
         "networking", "operating systems", "dbms",
     }:
         return """
@@ -1229,6 +1254,15 @@ async def interrupt_lesson(req: InterruptRequest, raw_request: Request):
         "- [MATH] is VISUAL-ONLY (chalkboard). NEVER put LaTeX inside [EXPLAIN].\n"
         "- [EXPLAIN] is spoken via TTS. NEVER put LaTeX or math notation inside [EXPLAIN].\n"
         "- NEVER write plain paragraphs without tags.\n"
+        "\n"
+        "CRITICAL POINT LIMIT FOR INTERRUPTION ANSWERS:\n"
+        "- When answering the interruption, use MAXIMUM 4 [POINT] blocks.\n"
+        "- Prefer 2–4 meaningful points depending on the user's question.\n"
+        "- Do NOT generate 6–8 points for an interruption.\n"
+        "- The interruption response should focus ONLY on answering/explaining the user's interruption question.\n"
+        "- CRITICAL: DO NOT put [POINT] tags inside [SUMMARY] for interruption responses either.\n"
+        "- DO NOT shorten the explanations. Keep interruption explanations full-quality and detailed.\n"
+        "- The point limit is STRUCTURAL only, not an explanation-quality reduction.\n"
         "\n"
         "STEP 1 - Answer the interruption in 1-3 [EXPLAIN] blocks. Be concise.\n"
         "STEP 2 - Write a brief transition [EXPLAIN] block to bridge back to the lesson.\n"

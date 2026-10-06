@@ -367,7 +367,7 @@ async function* streamEndpoint(endpoint, body, signal) {
 const SUBJECT_SUGGESTIONS = [
   'General', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
   'Computer Science', 'History', 'Geography', 'Civics', 'Economics',
-  'Social Science', 'Literature', 'Languages', 'Electronics',
+  'Social Science', 'Literature', 'Languages',
   'Networking', 'Operating Systems', 'DBMS', 'Software Engineering',
   'IoT', 'Engineering'
 ];
