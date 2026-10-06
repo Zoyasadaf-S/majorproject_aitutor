@@ -1,10 +1,11 @@
+import asyncio
 import sqlite3
 from fastapi import FastAPI, Request, HTTPException, Header, status, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import urllib.parse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import httpx
 import json
@@ -438,10 +439,13 @@ class TeachRequest(BaseModel):
 
 class InterruptRequest(BaseModel):
     topic: str
-    history: List[Dict[str, str]]
-    question: str
+    user_query: Optional[str] = None
+    question: Optional[str] = None
+    history: List[Dict[str, str]] = Field(default_factory=list)
     subject: Optional[str] = "General"   # hint only
     resume_point: Optional[str] = None
+    last_completed_block_id: Optional[str] = None
+    remaining_blocks: List[Dict[str, str]] = Field(default_factory=list)
 
 class TTSRequest(BaseModel):
     text: str
@@ -840,6 +844,27 @@ async def delete_user_by_admin(user_id: str, authorization: Optional[str] = Head
     return {"status": "success", "message": "User and all associated data permanently deleted."}
 
 # ── Groq streaming helper ─────────────────────────────────────────────────────
+def groq_error_detail(status_code: int, body: bytes, retry_after: Optional[str] = None) -> str:
+    """Extract a concise provider error so 429s can be diagnosed accurately."""
+    message = ""
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+        elif error:
+            message = str(error).strip()
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        pass
+
+    if status_code == 429:
+        detail = f"Groq returned HTTP 429: {message}" if message else "Groq returned HTTP 429 without an error description."
+        if retry_after:
+            detail += f" Retry after {retry_after} seconds."
+        return detail[:600]
+    return f"Groq API request failed (HTTP {status_code})."
+
+
 async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: Request = None):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -855,7 +880,12 @@ async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: 
     async with httpx.AsyncClient(timeout=60.0) as client:
         async with client.stream("POST", GROQ_API_URL, headers=headers, json=payload) as response:
             if response.status_code != 200:
-                yield f"data: {json.dumps({'error': f'API Error: {response.status_code}', 'status': response.status_code})}\n\n"
+                body = await response.aread()
+                error_message = groq_error_detail(
+                    response.status_code, body, response.headers.get("retry-after")
+                )
+                logger.warning("Groq streaming request rejected: status=%s model=%s detail=%s", response.status_code, GROQ_MODEL, error_message)
+                yield f"data: {json.dumps({'error': error_message, 'status': response.status_code})}\n\n"
                 return
 
             async for chunk in response.aiter_lines():
@@ -871,6 +901,39 @@ async def stream_groq(messages: List[Dict[str, str]], system: str, raw_request: 
                     except json.JSONDecodeError:
                         continue
             yield "data: [DONE]\n\n"
+
+
+async def complete_groq(messages: List[Dict[str, str]], system: str) -> str:
+    """Return one complete model response for endpoints that need structured JSON."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream": False,
+        "temperature": 0.5
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        logger.exception("LLM request could not connect")
+        raise HTTPException(status_code=502, detail="The language model service is unreachable.") from exc
+    if response.status_code == 429:
+        detail = groq_error_detail(response.status_code, response.content, response.headers.get("retry-after"))
+        logger.warning("Groq completion request rejected: status=429 model=%s detail=%s", GROQ_MODEL, detail)
+        raise HTTPException(status_code=429, detail=detail)
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"LLM request failed ({response.status_code}).")
+    try:
+        content = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="LLM returned an invalid completion.") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=502, detail="LLM returned an empty completion.")
+    return content.strip()
 
 # ── Document & Image API Endpoints ───────────────────────────────────────────
 @app.post("/api/documents/upload")
@@ -1132,16 +1195,37 @@ INSTRUCTIONS FOR TEACHER:
 # ── /api/interrupt ────────────────────────────────────────────────────────────
 @app.post("/api/interrupt")
 async def interrupt_lesson(req: InterruptRequest, raw_request: Request):
-    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + """
+    user_query = (req.user_query or req.question or "").strip()
+    if not user_query:
+        raise HTTPException(status_code=422, detail="user_query is required.")
 
-======================================================
-INTERRUPTION HANDLING AND RESUMPTION
-======================================================
-Answer the interruption directly and concisely, then include a short natural spoken
-transition and continue the academic lesson from the exact supplied resume point. Keep
-the established subject teaching format and depth for the resumed lesson. Do not repeat
-covered content, invent a new topic, or impose a fixed number of lesson blocks. The resume
-point is the last completed lesson block; continue with the next uncovered idea."""
+    remaining_content = "\n".join(
+        f"[{block.get('tag', 'EXPLAIN')}] {block.get('content', '')}" if block.get("tag") else block.get("content", "")
+        for block in req.remaining_blocks
+        if block.get("content", "").strip()
+    )
+    if not remaining_content:
+        remaining_content = req.resume_point or "Continue from the next uncovered point in the lesson history."
+
+    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + f"""
+
+You are an active live teacher presenting a lesson on '{req.topic}'. The student just
+interrupted you mid-explanation with: '{user_query}'
+
+INSTRUCTIONS:
+1. Answer the student's interruption directly, accurately, and concisely.
+2. Provide a natural teacher voice transition (for example, 'Now, returning to where we
+   paused...').
+3. Directly attach and continue explaining the lesson using the next remaining content:
+'{remaining_content}'
+
+RULES:
+- Preserve the established core subject teaching methodology and pedagogical tone.
+- Do NOT re-explain or repeat concepts covered before the interrupt point.
+- Deliver the answer, bridge, and continuation in a single unified response separated by
+  double newlines (\\n\\n).
+- For this endpoint, write natural spoken paragraphs without machine-readable tag wrappers.
+"""
 
     recent_history = req.history[-6:] if len(req.history) > 6 else req.history
 
@@ -1149,19 +1233,23 @@ point is the last completed lesson block; continue with the next uncovered idea.
         {
             "role": "user",
             "content": (
-                f"Topic being taught: {req.topic}\n"
-                f"Selected subject: {req.subject or 'General'}\n"
-                f"Student interruption: \"{req.question}\"\n\n"
-                f"Last completed lesson block / resume point: {req.resume_point or 'Infer the next uncovered point from the lesson history.'}\n\n"
-                f"Answer the interrupt, use a short spoken bridge back to the lesson, and continue from the next uncovered point. Preserve the original subject lesson structure and do not repeat prior material."
+                f"Last completed lesson block ID: {req.last_completed_block_id or 'unknown'}\n"
+                f"The next uncovered lesson content is supplied in the active teacher instructions. "
+                f"Respond with the interruption answer, a brief spoken bridge, and the lesson continuation."
             )
         }
     ]
-
-    return StreamingResponse(
-        stream_groq(messages, interrupt_system, raw_request),
-        media_type="text/event-stream"
-    )
+    completion = await complete_groq(messages, interrupt_system)
+    plain_text = re.sub(r"\[LANG\][a-z]{2}\[/LANG\]", "", completion, flags=re.IGNORECASE)
+    plain_text = re.sub(r"\[/?(?:HEADING|POINT|EXPLAIN|IMAGE|DIAGRAM|MATH|CODE|QUESTION|QUIZ|WARNING|SUMMARY)\]", "", plain_text, flags=re.IGNORECASE)
+    plain_text = plain_text.replace("\r\n", "\n")
+    paragraphs = [part.strip() for part in plain_text.split("\n\n") if part.strip()]
+    if not paragraphs:
+        raise HTTPException(status_code=502, detail="LLM returned no usable interruption response.")
+    return {
+        "status": "success",
+        "blocks": [{"id": f"resumed_{index}", "text": text} for index, text in enumerate(paragraphs)]
+    }
 
 # ── /api/image ────────────────────────────────────────────────────────────────
 # Fetches a REAL image from Wikimedia Commons → Wikipedia → Unsplash.
@@ -1519,117 +1607,284 @@ You MUST respond strictly with valid JSON in this exact structure:
         "feedback": "Keep practicing to reinforce this concept."
     }
 
+# ── Local quiz generation helpers ──────────────────────────────────────────────
+QUIZ_STOPWORDS = {
+    "about", "above", "after", "again", "against", "also", "among", "because", "before", "being", "below", "between", "both", "could", "does", "during", "each", "from", "further", "have", "having", "into", "itself", "more", "most", "other", "over", "same", "should", "some", "such", "than", "that", "their", "them", "then", "there", "these", "they", "this", "those", "through", "under", "until", "very", "what", "when", "where", "which", "while", "with", "would", "your", "the", "and", "for", "are", "was", "were", "has", "had", "can", "will", "its", "not", "but", "you", "use", "used", "using", "one", "two", "three", "four", "five", "within", "without", "per", "via"
+}
+
+def _quiz_collect_text(value):
+    """Flatten saved lesson blocks into readable source text."""
+    parts = []
+    if isinstance(value, str):
+        if value.strip():
+            parts.append(value.strip())
+    elif isinstance(value, dict):
+        for key in ("title", "heading", "content", "text", "body", "description", "explanation", "points", "items"):
+            if key in value:
+                parts.extend(_quiz_collect_text(value[key]))
+        if not parts:
+            for child in value.values():
+                parts.extend(_quiz_collect_text(child))
+    elif isinstance(value, list):
+        for child in value:
+            parts.extend(_quiz_collect_text(child))
+    return parts
+
+def _quiz_sentences(source):
+    import re as _re
+    # Keep line breaks/code snippets out of ordinary sentence splitting.
+    cleaned = _re.sub(r"```[\s\S]*?```", " ", source)
+    cleaned = _re.sub(r"`([^`]+)`", r"\1", cleaned)
+    return [x.strip(" \t\r\n-•") for x in _re.split(r"(?<=[.!?])\s+|\n+", cleaned) if len(x.split()) >= 7]
+
+def _quiz_terms(sentences):
+    import re as _re
+    counts = {}
+    for sentence in sentences:
+        for token in _re.findall(r"\b[A-Za-z][A-Za-z0-9_-]{3,}\b", sentence):
+            normalized = token.strip("_-")
+            if normalized.casefold() in QUIZ_STOPWORDS or normalized.isdigit():
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+    # Stable, useful distractors from terms actually present in the lesson.
+    return sorted(counts, key=lambda term: (-counts[term], -len(term), term.casefold()))
+
+def _build_local_quiz(source, topic, difficulty):
+    import random as _random
+    import re as _re
+    sentences = _quiz_sentences(source)
+    terms = _quiz_terms(sentences)
+    if len(terms) < 5 or len(sentences) < 5:
+        raise ValueError("Not enough lesson content to build five grounded questions")
+
+    # Select meaningful terms and sentences; use the source sentence as the explanation.
+    candidates = []
+    used_terms = set()
+    for sentence in sentences:
+        matches = [t for t in terms if t.casefold() not in used_terms and _re.search(r"(?<![A-Za-z0-9_-])" + _re.escape(t) + r"(?![A-Za-z0-9_-])", sentence, flags=_re.I)]
+        if not matches:
+            continue
+        if difficulty == "Easy":
+            target = min(matches, key=lambda t: (len(t), t.casefold()))
+        elif difficulty == "Hard":
+            target = max(matches, key=lambda t: (len(t), t.casefold()))
+        else:
+            target = max(matches, key=lambda t: (sum(ch.isupper() for ch in t) > 1, len(t)))
+        if len(sentence.split()) > (45 if difficulty == "Hard" else 65):
+            continue
+        candidates.append((sentence, target))
+        used_terms.add(target.casefold())
+        if len(candidates) >= 5:
+            break
+
+    if len(candidates) < 5:
+        raise ValueError("Lesson content does not contain five distinct, usable facts")
+
+    output = []
+    for idx, (sentence, target) in enumerate(candidates):
+        distractors = [t for t in terms if t.casefold() != target.casefold()]
+        # Prefer terms of similar length to reduce obvious answer cues.
+        distractors.sort(key=lambda t: (abs(len(t) - len(target)), t.casefold()))
+        choices = [target] + distractors[:3]
+        if len(choices) < 4:
+            raise ValueError("Not enough distinct terms for answer choices")
+        _random.Random(f"{topic}:{idx}:{target}").shuffle(choices)
+        correct_id = "ABCD"[choices.index(target)]
+        masked = _re.sub(r"(?<![A-Za-z0-9_-])" + _re.escape(target) + r"(?![A-Za-z0-9_-])", "_____", sentence, count=1, flags=_re.I)
+        if masked == sentence:
+            continue
+        output.append({
+            "id": str(idx + 1),
+            "question": f"Complete the statement based on the lesson:\n\n{masked}",
+            "options": [{"id": letter, "text": choice} for letter, choice in zip("ABCD", choices)],
+            "correct_id": correct_id,
+            "explanation": f"The lesson states: {sentence}"
+        })
+    if len(output) != 5:
+        raise ValueError("Could not construct five valid questions")
+    return output
+
+async def _post_gemini_quiz_with_retries(client, endpoint, headers, payload):
+    """Retry transient Gemini overload/rate-limit responses with bounded backoff."""
+    max_attempts = 4  # initial attempt plus three retries
+    response = None
+    for attempt in range(max_attempts):
+        response = await client.post(endpoint, headers=headers, json=payload)
+        if response.status_code not in {429, 503} or attempt == max_attempts - 1:
+            return response
+
+        delay_seconds = min(2 ** attempt, 4)
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                delay_seconds = min(max(delay_seconds, float(retry_after)), 5)
+            except ValueError:
+                pass
+        logger.warning(
+            "Gemini quiz request returned %s; retry %s/%s in %ss",
+            response.status_code, attempt + 1, max_attempts - 1, delay_seconds
+        )
+        await asyncio.sleep(delay_seconds)
+    return response
+
+
 # ── /api/quiz ─────────────────────────────────────────────────────────────────
 @app.post("/api/quiz")
 async def generate_topic_quiz(req: QuizRequest, authorization: Optional[str] = Header(None)):
     difficulty = req.difficulty.strip().title()
     if difficulty not in {"Easy", "Medium", "Hard"}:
         raise HTTPException(status_code=422, detail="Difficulty must be Easy, Medium, or Hard.")
-    source_context = ""
-    if req.document_id:
-        user = get_current_user(authorization)
-        chunks = retrieve_relevant_chunks(user["id"], req.document_id, req.topic, top_k=5)
-        if chunks:
-            source_context = "\n\nPrioritize this uploaded lesson material as the source of truth:\n" + "\n\n".join(c["text"] for c in chunks)
+
+    source_parts = []
+    user = None
+    if req.document_id or authorization:
+        try:
+            user = get_current_user(authorization)
+        except Exception:
+            if req.document_id:
+                raise
+
+    if req.document_id and user:
+        chunks = retrieve_relevant_chunks(user["id"], req.document_id, req.topic, top_k=8)
+        source_parts.extend(c.get("text", "") for c in chunks if isinstance(c, dict))
+
+    # Reuse the learner's own saved lesson when no uploaded document was selected.
+    if not source_parts and user:
+        conn = sqlite3.connect("cognilearn.db")
+        try:
+            c = conn.cursor()
+            c.execute("SELECT blocks FROM history WHERE user_id = ? AND LOWER(topic) = LOWER(?) ORDER BY date DESC LIMIT 3", (user["id"], req.topic))
+            for row in c.fetchall():
+                try:
+                    source_parts.extend(_quiz_collect_text(json.loads(row[0])))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+        finally:
+            conn.close()
+
+    source = "\n\n".join(part for part in source_parts if isinstance(part, str) and part.strip())
+    # Gemini is used only for quiz generation. The existing teach_system and
+    # other Groq-backed endpoints are intentionally left unchanged.
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    if not gemini_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini is not configured. Add GEMINI_API_KEY to your backend .env file and restart the server."
+        )
 
     difficulty_guidance = {
-        "Easy": "Test basic definitions, fundamental concepts, and direct recall.",
-        "Medium": "Test conceptual understanding and application, including multiple reasoning steps where appropriate.",
-        "Hard": "Test advanced concepts, challenging scenarios, problem-solving, and deeper multi-step reasoning."
+        "Easy": "Focus on foundational understanding, definitions, and direct application.",
+        "Medium": "Test conceptual understanding and practical application, with some multi-step reasoning.",
+        "Hard": "Use challenging scenarios, analysis, debugging, and multi-step reasoning where appropriate. Avoid trick questions."
     }[difficulty]
-    prompt = f"""
-You are an academic test designer.
+    source_guidance = (
+        "Use the supplied lesson material as the primary source of truth."
+        if source.strip()
+        else "No lesson material was supplied. Use your reliable subject knowledge to write an accurate quiz for the requested topic."
+    )
+    source_section = (
+        f"\n\nLESSON SOURCE MATERIAL:\n{source[:24000]}"
+        if source.strip()
+        else ""
+    )
+    prompt = f"""You are an expert academic assessment designer creating a high-quality quiz for an adaptive AI tutor.
 Subject: {req.subject}
 Topic: {req.topic}
 Difficulty: {difficulty}
-Language: {req.language} (ISO-639 language code if abbreviated; write naturally in that language).
-{difficulty_guidance}
-{source_context}
+Language: {req.language}
+Difficulty guidance: {difficulty_guidance}
+Source guidance: {source_guidance}{source_section}
 
-Task:
-Generate exactly 5 distinct, non-duplicate multiple-choice questions testing only the topic and subject above.
-Use the requested difficulty to change the actual reasoning complexity. Write all question text, options, and explanations in {req.language}.
-Preserve meaningful line breaks, indentation, paragraphs, and numbered lists in question text, options, and explanations. Put multiline programming code in fenced Markdown code blocks with the language name; encode line breaks as JSON escape sequences rather than flattening the code.
-For each question provide:
-- a clear question statement
-- exactly 4 options labeled "A", "B", "C", "D"
-- correct option ID ("A", "B", or "C")
-- a short explanation for the correct answer
-Ensure exactly one option is correct and every correct_id matches one option ID.
+Create exactly five distinct multiple-choice questions about the requested topic. If lesson source material is provided, ground the questions in it and do not contradict it. If no source is provided, use reliable general knowledge.
+Requirements:
+- Assess different learning objectives; do not repeat the same concept in different wording.
+- Use a thoughtful mix of recall, conceptual understanding, and application appropriate to the requested difficulty.
+- Every question must have exactly four plausible options with IDs A, B, C, D.
+- Exactly one option must be correct.
+- Include a concise but instructive explanation that explains why the correct answer is right.
+- Keep all question text, options, and explanations in {req.language}.
+- For code questions, preserve code formatting and use escaped newlines in JSON strings.
+- Do not include markdown fences or any text outside the JSON.
 
-You MUST respond strictly with valid JSON array in this exact structure:
-[
-  {{
-    "id": "1",
-    "question": "...",
-    "options": [
-      {{"id": "A", "text": "..."}},
-      {{"id": "B", "text": "..."}},
-      {{"id": "C", "text": "..."}},
-      {{"id": "D", "text": "..."}}
-    ],
-    "correct_id": "B",
-    "explanation": "..."
-  }}
-]
+Return a JSON array with this exact shape:
+[{{"id":"1","question":"...","options":[{{"id":"A","text":"..."}},{{"id":"B","text":"..."}},{{"id":"C","text":"..."}},{{"id":"D","text":"..."}}],"correct_id":"B","explanation":"..."}}]
 """
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
     payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a test designer. Output ONLY a valid JSON array."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.35,
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 5000
+        }
     }
-
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(GROQ_API_URL, headers=headers, json=payload)
-            if res.status_code == 200:
-                data = res.json()
-                content = data["choices"][0]["message"]["content"].strip()
-                start_idx = content.find('[')
-                end_idx   = content.rfind(']')
-                if start_idx != -1 and end_idx != -1:
-                    generated = json.loads(content[start_idx: end_idx + 1])
-                    if not isinstance(generated, list) or len(generated) != 5:
-                        raise ValueError("Quiz must contain exactly five questions")
-                    normalized = []
-                    seen_questions = set()
-                    for index, item in enumerate(generated):
-                        if not isinstance(item, dict):
-                            raise ValueError("Question is not an object")
-                        question = item.get("question")
-                        options = item.get("options")
-                        correct_id = item.get("correct_id")
-                        explanation = item.get("explanation")
-                        if not isinstance(question, str) or not question.strip() or not isinstance(explanation, str) or not explanation.strip():
-                            raise ValueError("Question or explanation is missing")
-                        fingerprint = re.sub(r"\W+", " ", question.casefold()).strip()
-                        if fingerprint in seen_questions:
-                            raise ValueError("Duplicate question")
-                        seen_questions.add(fingerprint)
-                        if not isinstance(options, list) or len(options) != 4:
-                            raise ValueError("Each question must have four options")
-                        option_ids = [option.get("id") for option in options if isinstance(option, dict)]
-                        if len(option_ids) != 4 or set(option_ids) != {"A", "B", "C", "D"} or len({option.get("text", "").strip() for option in options if isinstance(option, dict) and isinstance(option.get("text"), str)}) != 4:
-                            raise ValueError("Options must be four distinct A-D choices")
-                        if correct_id not in option_ids or any(not isinstance(option.get("text"), str) or not option["text"].strip() for option in options):
-                            raise ValueError("Correct answer or option text is invalid")
-                        # Validate with strip(), but return the model's original strings. Trimming
-                        # the payload can remove meaningful indentation or boundary newlines.
-                        normalized.append({"id": str(index + 1), "question": question, "options": options, "correct_id": correct_id, "explanation": explanation})
-                    return normalized
-            raise HTTPException(status_code=502, detail="Quiz generation failed. Please retry.")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await _post_gemini_quiz_with_retries(
+                client,
+                endpoint,
+                headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
+                payload=payload
+            )
+        if response.status_code != 200:
+            logger.error("Gemini quiz request failed: status=%s body=%s", response.status_code, response.text[:1000])
+            if response.status_code == 429:
+                raise HTTPException(status_code=429, detail="Gemini remained rate-limited after automatic retries. Check its usage limits and retry after reset.")
+            if response.status_code == 503:
+                raise HTTPException(status_code=503, detail="Gemini remained unavailable after automatic retries. Please retry shortly.")
+            if response.status_code in {401, 403}:
+                raise HTTPException(status_code=502, detail="Gemini rejected the configured API key or its permissions.")
+            raise HTTPException(status_code=502, detail=f"Gemini quiz generation failed (HTTP {response.status_code}). Check the configured model and try again.")
+
+        response_data = response.json()
+        candidates = response_data.get("candidates") or []
+        parts = (candidates[0].get("content", {}).get("parts", []) if candidates else [])
+        content = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
+        if not content:
+            raise ValueError("Gemini returned an empty response")
+        generated = json.loads(content)
+        if not isinstance(generated, list) or len(generated) != 5:
+            raise ValueError("Quiz must contain exactly five questions")
+
+        normalized = []
+        seen_questions = set()
+        for index, item in enumerate(generated):
+            if not isinstance(item, dict):
+                raise ValueError("Question is not an object")
+            question = item.get("question")
+            options = item.get("options")
+            correct_id = item.get("correct_id")
+            explanation = item.get("explanation")
+            if not isinstance(question, str) or not question.strip() or not isinstance(explanation, str) or not explanation.strip():
+                raise ValueError("Question or explanation is missing")
+            fingerprint = re.sub(r"\W+", " ", question.casefold()).strip()
+            if fingerprint in seen_questions:
+                raise ValueError("Duplicate question")
+            seen_questions.add(fingerprint)
+            if not isinstance(options, list) or len(options) != 4 or any(not isinstance(option, dict) for option in options):
+                raise ValueError("Each question must have four options")
+            option_ids = [option.get("id") for option in options]
+            option_texts = [option.get("text") for option in options]
+            if set(option_ids) != {"A", "B", "C", "D"} or len(set(option_texts)) != 4:
+                raise ValueError("Options must be four distinct A-D choices")
+            if correct_id not in option_ids or any(not isinstance(text, str) or not text.strip() for text in option_texts):
+                raise ValueError("Correct answer or option text is invalid")
+            normalized.append({
+                "id": str(index + 1), "question": question, "options": options,
+                "correct_id": correct_id, "explanation": explanation
+            })
+        return normalized
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"[quiz] Error: {e}")
-    raise HTTPException(status_code=502, detail="Quiz generation returned an invalid response. Please retry.")
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        logger.exception("Gemini returned an invalid quiz response")
+        raise HTTPException(status_code=502, detail="Gemini returned an invalid quiz. Please retry.") from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Gemini took too long to generate the quiz. Please retry.") from exc
+    except httpx.HTTPError as exc:
+        logger.exception("Gemini quiz network error")
+        raise HTTPException(status_code=502, detail="Could not reach Gemini. Please retry.") from exc
 
 # ── /api/practice ─────────────────────────────────────────────────────────────
 @app.post("/api/practice")

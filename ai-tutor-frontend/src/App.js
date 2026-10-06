@@ -413,6 +413,8 @@ export default function App() {
   
   const [audioQueue, setAudioQueue] = useState([]);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [lastCompletedBlockId, setLastCompletedBlockId] = useState(null);
+  const lastCompletedBlockIdRef = useRef(null);
   const audioQueueRef = useRef(audioQueue);
   const ttsGenerationQueueRef = useRef(Promise.resolve());
   const ttsAbortControllersRef = useRef(new Set());
@@ -423,6 +425,8 @@ export default function App() {
   const lessonContextRef = useRef(''); 
   const abortControllerRef = useRef(null);
   const currentUtteranceRef = useRef(null);
+  const currentAudioBlockIdRef = useRef(null);
+  const resumedBlockIdsByEndPosRef = useRef(new Map());
   const currentStreamIdRef = useRef(0);
 
   useEffect(() => {
@@ -456,10 +460,12 @@ export default function App() {
     ttsAbortControllersRef.current.forEach(controller => controller.abort());
     ttsAbortControllersRef.current.clear();
     if (currentUtteranceRef.current instanceof Audio) {
-      currentUtteranceRef.current.pause();
-      currentUtteranceRef.current.currentTime = 0;
-      currentUtteranceRef.current.src = "";
+      const activeAudio = currentUtteranceRef.current;
+      activeAudio.pause();
+      activeAudio.removeAttribute('src');
+      activeAudio.load();
     }
+    currentAudioBlockIdRef.current = null;
     setAudioQueue(prev => {
       prev.forEach(item => {
         if (item.url) URL.revokeObjectURL(item.url);
@@ -510,12 +516,16 @@ export default function App() {
 
       const audio = new Audio(nextItem.url);
       currentUtteranceRef.current = audio;
+      currentAudioBlockIdRef.current = nextItem.blockId || null;
 
       const releaseCurrentAudio = (errorMessage = '') => {
         if (errorMessage) setAudioError(errorMessage);
         setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
         setIsPlaying(false);
-        if (currentUtteranceRef.current === audio) currentUtteranceRef.current = null;
+        if (currentUtteranceRef.current === audio) {
+          currentUtteranceRef.current = null;
+          currentAudioBlockIdRef.current = null;
+        }
         audio.pause();
         audio.removeAttribute('src');
         audio.load();
@@ -524,6 +534,10 @@ export default function App() {
 
       audio.onended = () => {
         setAudioError('');
+        if (nextItem.blockId) {
+          lastCompletedBlockIdRef.current = nextItem.blockId;
+          setLastCompletedBlockId(nextItem.blockId);
+        }
         releaseCurrentAudio();
       };
       
@@ -748,6 +762,7 @@ export default function App() {
 
       const tag = match[1].toUpperCase();
       const rawContent = (match[2] || '').trim();
+      const blockId = resumedBlockIdsByEndPosRef.current.get(endPos) || `block-${endPos}`;
       processedUpToRef.current = endPos;
 
       // Accumulate lesson context (for interrupt re-send)
@@ -759,10 +774,10 @@ export default function App() {
         const cleanText = stripSpokenText(rawContent);
         if (cleanText && streamId === currentStreamIdRef.current) {
           const id = Date.now() + Math.random();
-          newTtsItems.push({ id, cleanText });
+          newTtsItems.push({ id, blockId, cleanText });
         }
         if (rawContent && streamId === currentStreamIdRef.current) {
-          newBlocks.push({ tag: 'EXPLAIN', content: rawContent, id: `block-${endPos}` });
+          newBlocks.push({ tag: 'EXPLAIN', content: rawContent, id: blockId });
         }
         continue;
       }
@@ -808,7 +823,7 @@ export default function App() {
       }
 
       if (safeContent || tag === 'DIAGRAM') {
-        newBlocks.push({ tag, content: safeContent, id: `block-${endPos}` });
+        newBlocks.push({ tag, content: safeContent, id: blockId });
       }
     }
 
@@ -818,8 +833,8 @@ export default function App() {
 
     if (newTtsItems.length > 0 && streamId === currentStreamIdRef.current) {
       const langForTts = detectedLanguageRef.current || 'en';
-      newTtsItems.forEach(({ id, cleanText }) => {
-        setAudioQueue(q => [...q, { id, streamId, ready: false, url: null }]);
+      newTtsItems.forEach(({ id, blockId, cleanText }) => {
+        setAudioQueue(q => [...q, { id, blockId, streamId, ready: false, url: null }]);
         ttsGenerationQueueRef.current = ttsGenerationQueueRef.current.then(async () => {
           if (streamId !== currentStreamIdRef.current) return;
           const controller = new AbortController();
@@ -937,6 +952,9 @@ export default function App() {
     rawBufferRef.current = '';
     processedUpToRef.current = 0;
     lessonContextRef.current = ''; 
+    resumedBlockIdsByEndPosRef.current.clear();
+    lastCompletedBlockIdRef.current = null;
+    setLastCompletedBlockId(null);
     setBlocks([]);
 
     const payload = {
@@ -955,7 +973,7 @@ export default function App() {
     } catch (e) {
       if (e.name !== 'AbortError' && !abortControllerRef.current?.signal?.aborted) {
         if (e.code === 'RATE_LIMITED') {
-          setStreamError('The tutor is busy right now. Please wait a moment, then try again.');
+          setStreamError(e.message || 'Groq returned HTTP 429. Check its rate limits and retry timing.');
         } else {
           console.error(e);
           setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
@@ -972,7 +990,41 @@ export default function App() {
     const question = (typeof customDoubt === 'string' ? customDoubt : interruption || '').trim();
     if (!question) return;
 
+    const lessonTagPattern = /\[(HEADING|POINT|EXPLAIN|MATH|CODE|DIAGRAM|QUESTION|WARNING|SUMMARY)\]([\s\S]*?)\[\/\1\]/gi;
+    const lessonBlocks = [...rawBufferRef.current.matchAll(lessonTagPattern)].map(match => {
+      const endPos = match.index + match[0].length;
+      return {
+        id: resumedBlockIdsByEndPosRef.current.get(endPos) || `block-${endPos}`,
+        tag: match[1].toUpperCase(),
+        content: match[2].trim()
+      };
+    });
+    const queuedBlockId = audioQueueRef.current.find(item => item.streamId === currentStreamIdRef.current && item.blockId)?.blockId;
+    const isAudioBlockActive = Boolean(currentAudioBlockIdRef.current);
+    const interruptedBlockId = currentAudioBlockIdRef.current || queuedBlockId || lastCompletedBlockIdRef.current || lastCompletedBlockId;
+    const interruptedIndex = lessonBlocks.findIndex(block => block.id === interruptedBlockId);
+    const remainingBlocks = interruptedIndex >= 0
+      ? lessonBlocks.slice(interruptedIndex + (isAudioBlockActive || queuedBlockId ? 0 : 1))
+      : lessonBlocks;
+
+    // If playback stopped mid-explanation, estimate the spoken position within that
+    // block and send only its unspoken tail before the remaining lesson blocks.
+    if (isAudioBlockActive && remainingBlocks[0]?.id === currentAudioBlockIdRef.current) {
+      const activeAudio = currentUtteranceRef.current;
+      const progress = activeAudio instanceof Audio && Number.isFinite(activeAudio.duration) && activeAudio.duration > 0
+        ? Math.min(1, Math.max(0, activeAudio.currentTime / activeAudio.duration))
+        : 0;
+      const spokenText = stripSpokenText(remainingBlocks[0].content);
+      let spokenChars = Math.floor(spokenText.length * progress);
+      while (spokenChars < spokenText.length && spokenChars > 0 && !/\s/.test(spokenText[spokenChars])) spokenChars += 1;
+      const unspokenTail = spokenText.slice(spokenChars).trim();
+      if (unspokenTail) remainingBlocks[0] = { ...remainingBlocks[0], content: unspokenTail };
+      else remainingBlocks.shift();
+    }
+
+    const lastCompletedId = interruptedBlockId || null;
     const streamId = stopCurrentStreamAndSpeech();
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
 
     setStreamError('');
     setAudioError('');
@@ -985,22 +1037,54 @@ export default function App() {
       { role: "user", content: `Teach me about: ${topic}` },
       { role: "assistant", content: rawBufferRef.current }
     ];
-    const completedLessonBlocks = [...rawBufferRef.current.matchAll(/\[(HEADING|POINT|EXPLAIN|MATH|CODE|DIAGRAM|QUESTION|WARNING|SUMMARY)\]([\s\S]*?)\[\/\1\]/gi)];
-    const latestBlock = completedLessonBlocks[completedLessonBlocks.length - 1];
-    const resumePoint = latestBlock
-      ? `Last completed block [${latestBlock[1].toUpperCase()}]: ${latestBlock[2].trim().slice(0, 1200)}. Continue with the next uncovered lesson point.`
-      : 'The lesson stream has started; infer the next uncovered point from the lesson history.';
-
     try {
-      for await (const chunk of streamEndpoint('interrupt', { topic, history, question, subject, resume_point: resumePoint }, abortControllerRef.current.signal)) {
-        if (streamId !== currentStreamIdRef.current) break;
-        rawBufferRef.current += chunk;
-        processRaw(rawBufferRef.current, streamId);
+      const token = localStorage.getItem('cognilearn_token');
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API}/interrupt`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          topic,
+          user_query: question,
+          history,
+          subject,
+          last_completed_block_id: lastCompletedId,
+          remaining_blocks: remainingBlocks
+        }),
+        signal: abortControllerRef.current.signal
+      });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        const requestError = new Error(failure.detail || `The server could not resume the lesson (HTTP ${response.status}).`);
+        if (response.status === 429) requestError.code = 'RATE_LIMITED';
+        throw requestError;
       }
+      const result = await response.json();
+      if (streamId !== currentStreamIdRef.current) return;
+      if (result.status !== 'success' || !Array.isArray(result.blocks)) {
+        throw new Error('The tutor returned an invalid lesson continuation.');
+      }
+      const responseBlocks = result.blocks
+        .filter(block => block && typeof block.text === 'string' && block.text.trim())
+        .map((block, index) => ({ id: block.id || `resumed_${index}`, text: block.text.trim() }));
+      if (responseBlocks.length === 0) throw new Error('The tutor returned no spoken continuation.');
+
+      // Feed the JSON response through the existing lesson parser so it updates the
+      // board and enqueues TTS blocks, which auto-play as soon as audio is ready.
+      const taggedResponse = responseBlocks.map(block => `[EXPLAIN]${block.text}[/EXPLAIN]`).join('');
+      const newBuffer = rawBufferRef.current + taggedResponse;
+      let blockEnd = rawBufferRef.current.length;
+      responseBlocks.forEach(block => {
+        blockEnd += `[EXPLAIN]${block.text}[/EXPLAIN]`.length;
+        resumedBlockIdsByEndPosRef.current.set(blockEnd, block.id);
+      });
+      rawBufferRef.current = newBuffer;
+      processRaw(rawBufferRef.current, streamId);
     } catch (e) {
       if (e.name !== 'AbortError' && !abortControllerRef.current?.signal?.aborted) {
-        if (e.code === 'RATE_LIMITED') {
-          setStreamError('The tutor is busy right now. Please wait a moment, then try again.');
+        if (e.code === 'RATE_LIMITED' || /HTTP 429/.test(e.message)) {
+          setStreamError(e.message || 'Groq returned HTTP 429. Check its rate limits and retry timing.');
         } else {
           console.error(e);
           setBlocks(prev => [...prev, { tag: 'WARNING', content: `API Error: ${e.message}. Rate limit hit or connection failed. Please wait a minute.`, id: Date.now() }]);
@@ -1015,20 +1099,44 @@ export default function App() {
 
   const exitToLanding = async () => {
     stopCurrentStreamAndSpeech();
-    
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+
+    // End the classroom immediately. Do not leave the old stream's error or
+    // lesson state visible while the optional history save is in flight.
     const lessonTitle = topic || selectedFile?.name || selectedImage?.name || "Class Session";
-    if (lessonTitle && blocks.length > 0) {
-      const token = localStorage.getItem('cognilearn_token');
-      const newClass = {
-        id: Date.now().toString(),
-        topic: lessonTitle,
-        blocks,
-        questionsAsked,
-        date: new Date().toLocaleString(),
-        subject,
-        language: detectedLanguageRef.current || 'en'
-      };
-      
+    const shouldSaveClass = Boolean(lessonTitle && blocks.length > 0);
+    const token = localStorage.getItem('cognilearn_token');
+    const newClass = shouldSaveClass ? {
+      id: Date.now().toString(),
+      topic: lessonTitle,
+      blocks,
+      questionsAsked,
+      date: new Date().toLocaleString(),
+      subject,
+      language: detectedLanguageRef.current || 'en'
+    } : null;
+
+    setStarted(false);
+    setIsStreaming(false);
+    setIsPaused(false);
+    setTopic('');
+    setSelectedFile(null);
+    setSelectedImage(null);
+    setUploadError('');
+    setStreamError('');
+    setAudioError('');
+    setAudioNeedsUserGesture(false);
+    setBlocks([]);
+    setInterruption('');
+    setQuestionsAsked([]);
+    setLastCompletedBlockId(null);
+    lastCompletedBlockIdRef.current = null;
+    resumedBlockIdsByEndPosRef.current.clear();
+    rawBufferRef.current = '';
+    processedUpToRef.current = 0;
+    lessonContextRef.current = '';
+
+    if (newClass) {
       try {
         const response = await fetch(`${API}/history`, {
           method: 'POST',
@@ -1044,20 +1152,6 @@ export default function App() {
         console.error("Failed to save class to database", e);
       }
     }
-
-    setStarted(false);
-    setIsStreaming(false);
-    setIsPaused(false);
-    setTopic('');
-    setSelectedFile(null);
-    setSelectedImage(null);
-    setUploadError('');
-    setBlocks([]);
-    setInterruption('');
-    setQuestionsAsked([]);
-    rawBufferRef.current = '';
-    processedUpToRef.current = 0;
-    lessonContextRef.current = ''; 
   };
 
   const handleLogout = async () => {

@@ -12,5 +12,6 @@ numpy
 pillow
 edge-tts
 passlib[bcrypt]
+bcrypt<4.1
 pyjwt
-easyocr
+easyocr
