@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
 import { BlockMath } from 'react-katex';
+import jsPDF from 'jspdf';
 
 import PracticeQuizzesPage from './components/PracticeQuizzesPage';
 import UserProfileDropdown from './components/UserProfileDropdown';
@@ -416,7 +417,6 @@ export default function App() {
   const [lastCompletedBlockId, setLastCompletedBlockId] = useState(null);
   const lastCompletedBlockIdRef = useRef(null);
   const audioQueueRef = useRef(audioQueue);
-  const ttsGenerationQueueRef = useRef(Promise.resolve());
   const ttsAbortControllersRef = useRef(new Set());
 
   const rawBufferRef = useRef('');
@@ -557,6 +557,8 @@ export default function App() {
       };
 
       audio.play().then(() => {
+        const playbackStartTime = Date.now();
+        console.log(`[TTS_TIMING] audio playback started at ${playbackStartTime}, blockId: ${nextItem.blockId}`);
         setAudioError('');
         setIsPlaying(true);
       }).catch(e => {
@@ -785,7 +787,9 @@ export default function App() {
         const cleanText = stripSpokenText(rawContent);
         if (cleanText && streamId === currentStreamIdRef.current) {
           const id = Date.now() + Math.random();
-          newTtsItems.push({ id, blockId, cleanText });
+          const explainReceivedTime = Date.now();
+          console.log(`[TTS_TIMING] EXPLAIN received at ${explainReceivedTime}, blockId: ${blockId}`);
+          newTtsItems.push({ id, blockId, cleanText, explainReceivedTime });
         }
         if (rawContent && streamId === currentStreamIdRef.current) {
           newBlocks.push({ tag: 'EXPLAIN', content: rawContent, id: blockId });
@@ -844,13 +848,19 @@ export default function App() {
 
     if (newTtsItems.length > 0 && streamId === currentStreamIdRef.current) {
       const langForTts = detectedLanguageRef.current || 'en';
-      newTtsItems.forEach(({ id, blockId, cleanText }) => {
+      newTtsItems.forEach(({ id, blockId, cleanText, explainReceivedTime }) => {
         setAudioQueue(q => [...q, { id, blockId, streamId, ready: false, url: null }]);
-        ttsGenerationQueueRef.current = ttsGenerationQueueRef.current.then(async () => {
+
+        // OPTIMIZATION: Remove sequential chaining. Start TTS immediately for each EXPLAIN.
+        // The audio queue ensures correct playback order regardless of when TTS completes.
+        (async () => {
           if (streamId !== currentStreamIdRef.current) return;
           const controller = new AbortController();
           ttsAbortControllersRef.current.add(controller);
           try {
+            const ttsRequestStartTime = Date.now();
+            console.log(`[TTS_TIMING] TTS request started at ${ttsRequestStartTime}, blockId: ${blockId}, delay from EXPLAIN: ${ttsRequestStartTime - explainReceivedTime}ms`);
+
             const response = await fetch(`${API}/tts`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -858,11 +868,18 @@ export default function App() {
               signal: controller.signal
             });
             if (!response.ok) throw new Error(`TTS request failed (${response.status})`);
+
+            const ttsResponseTime = Date.now();
+            console.log(`[TTS_TIMING] TTS response received at ${ttsResponseTime}, blockId: ${blockId}, TTS duration: ${ttsResponseTime - ttsRequestStartTime}ms`);
+
             const blob = await response.blob();
             if (!blob.size) throw new Error('TTS returned an empty audio file');
             if (streamId !== currentStreamIdRef.current) return;
 
+            const urlCreationTime = Date.now();
             const url = URL.createObjectURL(blob);
+            console.log(`[TTS_TIMING] audio URL created at ${urlCreationTime}, blockId: ${blockId}, URL creation: ${urlCreationTime - ttsResponseTime}ms`);
+
             setAudioQueue(q => {
               if (streamId !== currentStreamIdRef.current || !q.some(item => item.id === id)) {
                 URL.revokeObjectURL(url);
@@ -878,7 +895,7 @@ export default function App() {
           } finally {
             ttsAbortControllersRef.current.delete(controller);
           }
-        });
+        })();
       });
     }
   }, []);
@@ -1142,175 +1159,175 @@ export default function App() {
     }
   };
 
-  const downloadLessonAsHtml = (cls) => {
+  const downloadLessonAsPdf = (cls) => {
     if (!cls || !cls.blocks || !Array.isArray(cls.blocks)) {
       console.error('Invalid lesson data for download');
       return;
     }
 
-    const generateHtml = () => {
-      let html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CogniLearn - ${cls.topic}</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      line-height: 1.6;
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 40px 20px;
-      background: #0f172a;
-      color: #e2e8f0;
-    }
-    h1 {
-      color: #f59e0b;
-      border-bottom: 2px solid #f59e0b;
-      padding-bottom: 10px;
-      margin-bottom: 30px;
-    }
-    .meta {
-      color: #94a3b8;
-      margin-bottom: 30px;
-      font-size: 14px;
-    }
-    .heading {
-      color: #fbbf24;
-      font-size: 24px;
-      margin: 30px 0 15px 0;
-      font-weight: 600;
-    }
-    .point {
-      background: rgba(245, 158, 11, 0.1);
-      border-left: 3px solid #f59e0b;
-      padding: 12px 15px;
-      margin: 10px 0;
-      border-radius: 4px;
-    }
-    .explain {
-      background: rgba(59, 130, 246, 0.1);
-      border-left: 3px solid #3b82f6;
-      padding: 15px;
-      margin: 15px 0;
-      border-radius: 4px;
-      line-height: 1.8;
-    }
-    .math {
-      background: rgba(236, 72, 153, 0.1);
-      border: 1px solid #ec4899;
-      padding: 15px;
-      margin: 15px 0;
-      border-radius: 4px;
-      font-family: 'Times New Roman', serif;
-      font-size: 18px;
-      text-align: center;
-    }
-    .code {
-      background: #1e293b;
-      border: 1px solid #475569;
-      padding: 15px;
-      margin: 15px 0;
-      border-radius: 4px;
-      font-family: 'Courier New', monospace;
-      white-space: pre-wrap;
-      overflow-x: auto;
-    }
-    .warning {
-      background: rgba(239, 68, 68, 0.1);
-      border-left: 3px solid #ef4444;
-      padding: 12px 15px;
-      margin: 15px 0;
-      border-radius: 4px;
-      color: #fca5a5;
-    }
-    .summary {
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid #10b981;
-      padding: 20px;
-      margin: 30px 0;
-      border-radius: 4px;
-    }
-    .summary-title {
-      color: #10b981;
-      font-weight: 600;
-      margin-bottom: 10px;
-    }
-    .image-placeholder {
-      background: rgba(148, 163, 184, 0.1);
-      border: 1px dashed #94a3b8;
-      padding: 20px;
-      margin: 15px 0;
-      text-align: center;
-      color: #94a3b8;
-      border-radius: 4px;
-    }
-  </style>
-</head>
-<body>
-  <h1>${cls.topic}</h1>
-  <div class="meta">
-    Subject: ${cls.subject || 'General'} | Date: ${cls.date}
-  </div>
-`;
+    // Create PDF document
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: 'a4'
+    });
 
-      cls.blocks.forEach(block => {
-        const tag = block.tag?.toUpperCase();
-        const content = block.content || '';
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 20;
+    const contentWidth = pageWidth - (margin * 2);
+    let yPosition = margin;
 
-        switch (tag) {
-          case 'HEADING':
-            html += `<div class="heading">${content}</div>\n`;
-            break;
-          case 'POINT':
-            html += `<div class="point">${content}</div>\n`;
-            break;
-          case 'EXPLAIN':
-            html += `<div class="explain">${content}</div>\n`;
-            break;
-          case 'MATH':
-            html += `<div class="math">${content}</div>\n`;
-            break;
-          case 'CODE':
-            html += `<div class="code">${content}</div>\n`;
-            break;
-          case 'WARNING':
-            html += `<div class="warning">${content}</div>\n`;
-            break;
-          case 'SUMMARY':
-            html += `<div class="summary">
-  <div class="summary-title">Summary</div>
-  ${content}
-</div>\n`;
-            break;
-          case 'IMAGE':
-          case 'DIAGRAM':
-            html += `<div class="image-placeholder">[Image/Diagram: ${content}]</div>\n`;
-            break;
-          default:
-            html += `<div>${content}</div>\n`;
-        }
-      });
-
-      html += `
-</body>
-</html>`;
-      return html;
+    // Helper to add page if needed
+    const checkPageBreak = (requiredSpace = 10) => {
+      if (yPosition + requiredSpace > pageHeight - margin) {
+        doc.addPage();
+        yPosition = margin;
+      }
     };
 
-    const htmlContent = generateHtml();
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
+    // Title
+    doc.setFontSize(24);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(59, 130, 246); // Blue
+    doc.text(cls.topic || 'Lesson', margin, yPosition);
+    yPosition += 15;
+
+    // Meta information
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100, 116, 139); // Gray
+    doc.text(`Subject: ${cls.subject || 'General'}`, margin, yPosition);
+    yPosition += 7;
+    doc.text(`Date: ${cls.date}`, margin, yPosition);
+    yPosition += 15;
+
+    // Render blocks
+    cls.blocks.forEach((block, index) => {
+      const tag = block.tag?.toUpperCase();
+      const content = block.content || '';
+
+      checkPageBreak(20);
+
+      switch (tag) {
+        case 'HEADING':
+          doc.setFontSize(18);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(245, 158, 11); // Orange
+          checkPageBreak(15);
+          doc.text(content, margin, yPosition);
+          yPosition += 12;
+          break;
+
+        case 'POINT':
+          doc.setFontSize(11);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(0, 0, 0);
+          checkPageBreak(10);
+          const pointText = `• ${content}`;
+          const pointLines = doc.splitTextToSize(pointText, contentWidth);
+          doc.text(pointLines, margin, yPosition);
+          yPosition += (pointLines.length * 6) + 5;
+          break;
+
+        case 'EXPLAIN':
+          doc.setFontSize(11);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(0, 0, 0);
+          checkPageBreak(15);
+          const explainLines = doc.splitTextToSize(content, contentWidth);
+          doc.text(explainLines, margin, yPosition);
+          yPosition += (explainLines.length * 6) + 8;
+          break;
+
+        case 'MATH':
+          doc.setFontSize(14);
+          doc.setFont('times', 'italic');
+          doc.setTextColor(220, 38, 38); // Red/pink
+          checkPageBreak(15);
+          doc.text(content, margin, yPosition);
+          yPosition += 12;
+          break;
+
+        case 'CODE':
+          doc.setFontSize(9);
+          doc.setFont('courier', 'normal');
+          doc.setTextColor(30, 41, 59); // Dark blue-gray
+          checkPageBreak(20);
+          const codeLines = doc.splitTextToSize(content, contentWidth);
+          // Draw a border around code
+          const codeHeight = codeLines.length * 5 + 10;
+          doc.setDrawColor(71, 85, 105);
+          doc.rect(margin - 3, yPosition - 5, contentWidth + 6, codeHeight);
+          doc.text(codeLines, margin, yPosition);
+          yPosition += codeHeight + 8;
+          break;
+
+        case 'WARNING':
+          doc.setFontSize(11);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(239, 68, 68); // Red
+          checkPageBreak(12);
+          doc.text(`⚠ ${content}`, margin, yPosition);
+          yPosition += 10;
+          break;
+
+        case 'SUMMARY':
+          doc.setFontSize(12);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(16, 185, 129); // Green
+          checkPageBreak(12);
+          doc.text('Summary', margin, yPosition);
+          yPosition += 8;
+          doc.setFontSize(11);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(0, 0, 0);
+          const summaryLines = doc.splitTextToSize(content, contentWidth);
+          doc.text(summaryLines, margin, yPosition);
+          yPosition += (summaryLines.length * 6) + 10;
+          break;
+
+        case 'IMAGE':
+        case 'DIAGRAM':
+          doc.setFontSize(10);
+          doc.setFont('helvetica', 'italic');
+          doc.setTextColor(148, 163, 184); // Gray
+          checkPageBreak(12);
+          doc.text(`[Image/Diagram: ${content}]`, margin, yPosition);
+          yPosition += 10;
+          break;
+
+        default:
+          doc.setFontSize(11);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(0, 0, 0);
+          checkPageBreak(10);
+          const defaultLines = doc.splitTextToSize(content, contentWidth);
+          doc.text(defaultLines, margin, yPosition);
+          yPosition += (defaultLines.length * 6) + 5;
+      }
+
+      // Add spacing between blocks
+      yPosition += 5;
+    });
+
+    // Add page numbers
+    const totalPages = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= totalPages; i++) {
+      doc.setPage(i);
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(148, 163, 184);
+      doc.text(`Page ${i} of ${totalPages}`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+    }
+
+    // Generate filename
     const safeTopic = (cls.topic || 'lesson').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
     const dateStr = new Date().toISOString().split('T')[0];
-    link.href = url;
-    link.download = `CogniLearn_${safeTopic}_${dateStr}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    const filename = `CogniLearn_${safeTopic}_${dateStr}.pdf`;
+
+    // Save PDF
+    doc.save(filename);
   };
 
   const exitToLanding = async () => {
@@ -1878,7 +1895,7 @@ export default function App() {
                           className="download-history-btn"
                           onClick={(e) => {
                             e.stopPropagation();
-                            downloadLessonAsHtml(cls);
+                            downloadLessonAsPdf(cls);
                           }}
                           title="Download lesson"
                         >
