@@ -78,7 +78,10 @@ const VisualImage = ({ query }) => {
 
 // Supported canvas diagram types — must match TEACH_SYSTEM prompt exactly
 const CANVAS_VALID_TYPES = new Set([
-  'right_triangle', 'triangle', 'circuit', 'graph', 'parabola',
+  'right_triangle', 'triangle', 'circuit', 'circuit series', 'circuit parallel',
+  'transformer', 'diode', 'led', 'transistor', 'capacitor', 'rc_circuit', 'rlc_circuit',
+  'voltage_divider', 'kcl', 'kvl',
+  'graph', 'parabola',
   'plot', 'circle', 'force_block', 'ray_diagram', 'flow_diagram',
   'osi_layers', 'water_cycle', 'bar_chart'
 ]);
@@ -151,15 +154,281 @@ const CanvasDiagram = ({ instructions }) => {
       ctx.moveTo(250, 40); ctx.lineTo(100, 260); ctx.lineTo(400, 260); ctx.closePath();
       ctx.fillText('A', 242, 30); ctx.fillText('B', 82, 278); ctx.fillText('C', 404, 278);
 
-    } else if (type === 'circuit') {
-      ctx.strokeRect(100, 90, 300, 140);
-      ctx.clearRect(228, 85, 44, 10);
-      ctx.fillText('⊣⊢ V', 225, 82);
-      ctx.clearRect(228, 224, 44, 10);
-      ctx.strokeRect(228, 216, 44, 14);
-      ctx.fillText('R', 244, 248);
-      ctx.fillText('+', 85, 168); ctx.fillText('−', 402, 168);
+    } else if (type === 'circuit' || type === 'circuit series' || type === 'circuit parallel') {
+      const isParallel = type === 'circuit parallel' || (type === 'circuit' && instructions && instructions.toLowerCase().includes('parallel'));
+      
+      if (isParallel) {
+        // Parallel circuit diagram
+        // Battery on left, branching node, two parallel branches, merging node
+        ctx.moveTo(80, 150); ctx.lineTo(120, 150); // Battery to node
+        ctx.moveTo(120, 100); ctx.lineTo(120, 200); // Vertical wire (branch)
+        ctx.moveTo(120, 100); ctx.lineTo(200, 100); ctx.lineTo(200, 140); // Top branch resistor
+        ctx.moveTo(120, 200); ctx.lineTo(200, 200); ctx.lineTo(200, 160); // Bottom branch resistor
+        ctx.moveTo(200, 100); ctx.lineTo(380, 100); ctx.lineTo(380, 150); // Top branch to node
+        ctx.moveTo(200, 200); ctx.lineTo(380, 200); ctx.lineTo(380, 150); // Bottom branch to node
+        ctx.moveTo(380, 150); ctx.lineTo(420, 150); // Node to battery return
+        
+        // Battery symbol
+        ctx.clearRect(50, 142, 44, 16);
+        ctx.fillText('⊣⊢ V', 45, 155);
+        
+        // Resistors in branches
+        ctx.strokeRect(200, 140, 30, 20);
+        ctx.strokeRect(200, 160, 30, 20);
+        ctx.fillText('R1', 205, 135);
+        ctx.fillText('R2', 205, 195);
+        
+        // Labels
+        ctx.fillText('+', 35, 155);
+        ctx.fillText('−', 435, 155);
+        ctx.fillText('Parallel Circuit', 180, 230);
+        
+      } else {
+        // Series circuit diagram (default or explicit series)
+        // Battery → Resistor → LED → return path
+        ctx.moveTo(80, 150); ctx.lineTo(150, 150); // Battery to resistor
+        ctx.moveTo(180, 150); ctx.lineTo(280, 150); // Resistor to LED
+        ctx.moveTo(310, 150); ctx.lineTo(420, 150); // LED to return
+        ctx.moveTo(420, 150); ctx.lineTo(420, 240); ctx.lineTo(80, 240); ctx.lineTo(80, 150); // Return wire
+        
+        // Battery symbol
+        ctx.clearRect(50, 142, 44, 16);
+        ctx.fillText('⊣⊢ V', 45, 155);
+        
+        // Resistor symbol
+        ctx.strokeRect(150, 140, 30, 20);
+        ctx.fillText('R', 155, 135);
+        
+        // LED symbol
+        ctx.beginPath();
+        ctx.moveTo(280, 140); ctx.lineTo(280, 160); ctx.lineTo(310, 140); ctx.lineTo(310, 160); ctx.closePath();
+        ctx.stroke();
+        ctx.moveTo(295, 120); ctx.lineTo(295, 180); // LED arrow
+        ctx.moveTo(295, 120); ctx.lineTo(288, 135);
+        ctx.moveTo(295, 120); ctx.lineTo(302, 135);
+        ctx.stroke();
+        ctx.fillText('LED', 280, 105);
+        
+        // Labels
+        ctx.fillText('+', 35, 155);
+        ctx.fillText('−', 35, 250);
+        ctx.fillText('Series Circuit', 180, 270);
+      }
 
+    } else if (type === 'transformer') {
+      // Transformer diagram
+      // Primary side with AC input, core, secondary side with load
+      ctx.moveTo(80, 150); ctx.lineTo(120, 150); // Primary wire
+      ctx.moveTo(120, 130); ctx.lineTo(120, 170); // Primary coil
+      ctx.moveTo(120, 130); ctx.lineTo(120, 170); // Primary coil rectangle
+      ctx.strokeRect(120, 130, 30, 40);
+      ctx.fillText('Primary', 125, 115);
+      ctx.fillText('N1', 125, 185);
+      
+      // Magnetic core
+      ctx.moveTo(150, 110); ctx.lineTo(150, 190); // Core left
+      ctx.moveTo(350, 110); ctx.lineTo(350, 190); // Core right
+      ctx.moveTo(150, 110); ctx.lineTo(350, 110); // Core top
+      ctx.moveTo(150, 190); ctx.lineTo(350, 190); // Core bottom
+      ctx.fillText('Magnetic Core', 200, 200);
+      
+      ctx.moveTo(380, 130); ctx.lineTo(380, 170); // Secondary coil
+      ctx.strokeRect(380, 130, 30, 40);
+      ctx.fillText('Secondary', 385, 115);
+      ctx.fillText('N2', 385, 185);
+      
+      ctx.moveTo(410, 150); ctx.lineTo(450, 150); // Secondary wire
+      ctx.strokeRect(440, 140, 20, 20); // Load
+      ctx.fillText('Load', 440, 135);
+      
+      // AC input
+      ctx.fillText('~', 55, 155);
+      ctx.fillText('AC Input', 45, 180);
+      ctx.fillText('V1', 125, 100);
+      ctx.fillText('V2', 385, 100);
+      ctx.fillText('Transformer', 180, 230);
+
+    } else if (type === 'diode') {
+      // Diode symbol
+      ctx.moveTo(200, 100); ctx.lineTo(200, 200); // Diode body
+      ctx.moveTo(200, 100); ctx.lineTo(300, 150); // Diode triangle top
+      ctx.moveTo(200, 200); ctx.lineTo(300, 150); // Diode triangle bottom
+      ctx.stroke();
+      
+      // Diode bar
+      ctx.moveTo(300, 120); ctx.lineTo(300, 180);
+      ctx.stroke();
+      
+      // Labels
+      ctx.fillText('Anode (+)', 180, 120);
+      ctx.fillText('Cathode (-)', 310, 120);
+      ctx.fillText('Diode', 220, 230);
+      
+      // Current arrow
+      ctx.moveTo(320, 140); ctx.lineTo(350, 140);
+      ctx.moveTo(350, 140); ctx.lineTo(345, 135);
+      ctx.moveTo(350, 140); ctx.lineTo(345, 145);
+      ctx.stroke();
+      ctx.fillText('I', 355, 145);
+
+    } else if (type === 'led') {
+      // LED circuit
+      ctx.moveTo(80, 150); ctx.lineTo(150, 150); // Wire to resistor
+      ctx.strokeRect(150, 140, 30, 20); // Resistor
+      ctx.fillText('R', 155, 135);
+      ctx.moveTo(180, 150); ctx.lineTo(220, 150); // Wire to LED
+      
+      // LED symbol
+      ctx.beginPath();
+      ctx.moveTo(220, 140); ctx.lineTo(220, 160); ctx.lineTo(250, 140); ctx.lineTo(250, 160); ctx.closePath();
+      ctx.stroke();
+      ctx.moveTo(235, 120); ctx.lineTo(235, 180); // LED arrow
+      ctx.moveTo(235, 120); ctx.lineTo(228, 135);
+      ctx.moveTo(235, 120); ctx.lineTo(242, 135);
+      ctx.stroke();
+      ctx.fillText('LED', 230, 105);
+      
+      ctx.moveTo(250, 150); ctx.lineTo(320, 150); // Wire to battery
+      ctx.clearRect(50, 142, 44, 16);
+      ctx.fillText('⊣⊢ V', 45, 155);
+      ctx.moveTo(320, 150); ctx.lineTo(320, 240); ctx.lineTo(80, 240); ctx.lineTo(80, 150); // Return
+      
+      ctx.fillText('+', 35, 155);
+      ctx.fillText('−', 35, 250);
+      ctx.fillText('LED Circuit', 180, 270);
+
+    } else if (type === 'transistor') {
+      // NPN transistor symbol
+      ctx.moveTo(200, 100); ctx.lineTo(200, 200); // Base
+      ctx.moveTo(200, 140); ctx.lineTo(250, 100); // Collector leg
+      ctx.moveTo(200, 160); ctx.lineTo(250, 200); // Emitter leg
+      ctx.moveTo(250, 100); ctx.lineTo(320, 100); // Collector wire
+      ctx.moveTo(250, 200); ctx.lineTo(320, 200); // Emitter wire
+      ctx.stroke();
+      
+      // Base terminal
+      ctx.moveTo(150, 150); ctx.lineTo(200, 150);
+      ctx.fillText('Base', 130, 145);
+      ctx.fillText('Collector', 250, 95);
+      ctx.fillText('Emitter', 250, 220);
+      ctx.fillText('NPN Transistor', 180, 230);
+      
+      // Current arrows
+      ctx.moveTo(325, 100); ctx.lineTo(340, 100);
+      ctx.moveTo(325, 200); ctx.lineTo(340, 200);
+      ctx.stroke();
+      ctx.fillText('Ic', 345, 105);
+      ctx.fillText('Ie', 345, 205);
+
+    } else if (type === 'capacitor' || type === 'rc_circuit') {
+      // Capacitor/RC circuit
+      ctx.moveTo(80, 150); ctx.lineTo(150, 150); // Wire to resistor
+      ctx.strokeRect(150, 140, 30, 20); // Resistor
+      ctx.fillText('R', 155, 135);
+      ctx.moveTo(180, 150); ctx.lineTo(250, 150); // Wire to capacitor
+      
+      // Capacitor symbol
+      ctx.moveTo(250, 130); ctx.lineTo(250, 170); // Left plate
+      ctx.moveTo(290, 130); ctx.lineTo(290, 170); // Right plate
+      ctx.stroke();
+      ctx.moveTo(250, 130); ctx.lineTo(290, 170); ctx.moveTo(290, 130); ctx.lineTo(250, 170); // Plates connection
+      ctx.stroke();
+      ctx.fillText('C', 265, 155);
+      
+      ctx.moveTo(290, 150); ctx.lineTo(360, 150); // Wire to battery
+      ctx.clearRect(50, 142, 44, 16);
+      ctx.fillText('⊣⊢ V', 45, 155);
+      ctx.moveTo(360, 150); ctx.lineTo(360, 240); ctx.lineTo(80, 240); ctx.lineTo(80, 150); // Return
+      
+      ctx.fillText('+', 35, 155);
+      ctx.fillText('−', 35, 250);
+      ctx.fillText(type === 'rc_circuit' ? 'RC Circuit' : 'Capacitor Circuit', 180, 270);
+
+    } else if (type === 'rlc_circuit') {
+      // RLC circuit with inductor
+      ctx.moveTo(80, 150); ctx.lineTo(130, 150); // Wire to resistor
+      ctx.strokeRect(130, 140, 25, 20); // Resistor
+      ctx.fillText('R', 132, 135);
+      ctx.moveTo(155, 150); ctx.lineTo(200, 150); // Wire to inductor
+      
+      // Inductor symbol (coil)
+      ctx.moveTo(200, 120); ctx.lineTo(200, 180); // Inductor body
+      ctx.moveTo(200, 120); ctx.lineTo(210, 120); ctx.lineTo(210, 180); ctx.lineTo(200, 180); // Coil loops
+      ctx.moveTo(210, 120); ctx.lineTo(220, 120); ctx.lineTo(220, 180); ctx.lineTo(210, 180);
+      ctx.moveTo(220, 120); ctx.lineTo(230, 120); ctx.lineTo(230, 180); ctx.lineTo(220, 180);
+      ctx.stroke();
+      ctx.fillText('L', 215, 115);
+      
+      ctx.moveTo(230, 150); ctx.lineTo(280, 150); // Wire to capacitor
+      ctx.moveTo(280, 130); ctx.lineTo(280, 170); ctx.lineTo(320, 170); ctx.lineTo(320, 130); ctx.lineTo(280, 130); // Capacitor
+      ctx.stroke();
+      ctx.fillText('C', 295, 155);
+      
+      ctx.moveTo(320, 150); ctx.lineTo(370, 150); // Wire to battery
+      ctx.clearRect(50, 142, 44, 16);
+      ctx.fillText('⊣⊢ V', 45, 155);
+      ctx.moveTo(370, 150); ctx.lineTo(370, 240); ctx.lineTo(80, 240); ctx.lineTo(80, 150); // Return
+      
+      ctx.fillText('+', 35, 155);
+      ctx.fillText('−', 35, 250);
+      ctx.fillText('RLC Circuit', 180, 270);
+
+    } else if (type === 'voltage_divider') {
+      // Voltage divider with two resistors
+      ctx.moveTo(80, 150); ctx.lineTo(130, 150); // Input wire
+      ctx.strokeRect(130, 140, 30, 20); // R1
+      ctx.fillText('R1', 135, 135);
+      ctx.moveTo(160, 150); ctx.lineTo(190, 150); // Connection
+      ctx.moveTo(190, 150); ctx.lineTo(190, 200); ctx.lineTo(220, 200); ctx.lineTo(220, 150); // Tap node
+      ctx.moveTo(220, 150); ctx.lineTo(280, 150); // Output wire
+      ctx.moveTo(190, 150); ctx.lineTo(280, 150); ctx.lineTo(280, 140); ctx.strokeRect(280, 140, 30, 20); // R2
+      ctx.fillText('R2', 285, 135);
+      ctx.moveTo(310, 150); ctx.lineTo(370, 150); // R2 to return
+      ctx.clearRect(50, 142, 44, 16);
+      ctx.fillText('⊣⊢ Vin', 35, 155);
+      ctx.fillText('Vout', 220, 105);
+      ctx.moveTo(370, 150); ctx.lineTo(370, 240); ctx.lineTo(80, 240); ctx.lineTo(80, 150); // Return
+      
+      ctx.fillText('+', 35, 155);
+      ctx.fillText('−', 35, 250);
+      ctx.fillText('Voltage Divider', 180, 270);
+
+    } else if (type === 'kcl') {
+      // Kirchhoff's Current Law - node with branches
+      ctx.beginPath();
+      ctx.arc(250, 150, 20, 0, 2 * Math.PI); // Central node
+      ctx.fill();
+      ctx.fillText('Node', 235, 185);
+      
+      ctx.moveTo(80, 150); ctx.lineTo(230, 150); // Incoming current I1
+      ctx.moveTo(270, 150); ctx.lineTo(350, 150); ctx.lineTo(350, 100); // Outgoing I2
+      ctx.moveTo(270, 150); ctx.lineTo(350, 150); ctx.lineTo(350, 200); // Outgoing I3
+      ctx.stroke();
+      
+      ctx.fillText('I1', 140, 145);
+      ctx.fillText('I2', 360, 95);
+      ctx.fillText('I3', 360, 220);
+      ctx.fillText('I1 = I2 + I3', 180, 240);
+      ctx.fillText('KCL', 230, 220);
+
+    } else if (type === 'kvl') {
+      // Kirchhoff's Voltage Law - closed loop
+      ctx.moveTo(100, 200); ctx.lineTo(100, 100); ctx.lineTo(250, 100); ctx.lineTo(400, 100); // Top loop
+      ctx.moveTo(400, 100); ctx.lineTo(400, 200); ctx.lineTo(250, 200); ctx.lineTo(100, 200); // Bottom loop
+      ctx.stroke();
+      
+      // Components
+      ctx.strokeRect(120, 110, 30, 20); // R1
+      ctx.strokeRect(220, 110, 30, 20); // R2
+      ctx.strokeRect(320, 110, 30, 20); // R3
+      ctx.clearRect(50, 142, 44, 16);
+      ctx.fillText('⊣⊢ V', 45, 155);
+      
+      ctx.fillText('R1', 125, 95);
+      ctx.fillText('R2', 225, 95);
+      ctx.fillText('R3', 325, 95);
+      ctx.fillText('V', 45, 140);
+      ctx.fillText('KVL: ΣV = 0', 200, 230);
     } else if (type === 'graph' || type === 'parabola' || type === 'plot') {
       arrow(40, 260, 460, 260); ctx.fillText('x', 448, 278);
       arrow(250, 310, 250, 20);  ctx.fillText('y', 256, 22);
@@ -1186,6 +1455,212 @@ export default function App() {
       }
     };
 
+    // Direct jsPDF LaTeX math renderer
+    const renderMathToPdf = (doc, latex, x, y, fontSize) => {
+      const greekLetters = {
+        '\\pi': 'π', '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\delta': 'δ',
+        '\\epsilon': 'ε', '\\theta': 'θ', '\\lambda': 'λ', '\\mu': 'μ', '\\sigma': 'σ',
+        '\\phi': 'φ', '\\omega': 'ω', '\\Delta': 'Δ', '\\Sigma': 'Σ', '\\Theta': 'Θ'
+      };
+
+      const parseFraction = (str) => {
+        const fracMatch = str.match(/\\frac\{([^}]+)\}\{([^}]+)\}/);
+        if (fracMatch) {
+          return { numerator: fracMatch[1], denominator: fracMatch[2], remaining: str.replace(fracMatch[0], '') };
+        }
+        return null;
+      };
+
+      const parseSqrt = (str) => {
+        const sqrtMatch = str.match(/\\sqrt\{([^}]+)\}/);
+        if (sqrtMatch) {
+          return { content: sqrtMatch[1], remaining: str.replace(sqrtMatch[0], '') };
+        }
+        return null;
+      };
+
+      const renderExpression = (expr, size, xOffset, yOffset) => {
+        let currentX = xOffset;
+        let result = [];
+        let i = 0;
+
+        while (i < expr.length) {
+          if (expr[i] === '\\') {
+            // Check for commands
+            let cmd = '';
+            let j = i + 1;
+            while (j < expr.length && /[a-zA-Z]/.test(expr[j])) {
+              cmd += expr[j];
+              j++;
+            }
+
+            if (greekLetters['\\' + cmd]) {
+              result.push({ text: greekLetters['\\' + cmd], x: currentX, y: yOffset, size: size });
+              currentX += size * 0.8;
+              i = j;
+            } else if (cmd === 'frac') {
+              // Should be handled by parseFraction
+              i = j;
+            } else {
+              i = j;
+            }
+          } else if (expr[i] === '^') {
+            // Superscript
+            let sup = '';
+            let j = i + 1;
+            if (expr[j] === '{') {
+              let braceCount = 1;
+              j++;
+              while (j < expr.length && braceCount > 0) {
+                if (expr[j] === '{') braceCount++;
+                if (expr[j] === '}') braceCount--;
+                if (braceCount > 0) sup += expr[j];
+                j++;
+              }
+            } else {
+              while (j < expr.length && /[a-zA-Z0-9]/.test(expr[j])) {
+                sup += expr[j];
+                j++;
+              }
+            }
+            if (sup) {
+              result.push({ text: sup, x: currentX, y: yOffset - size * 0.35, size: size * 0.65, type: 'superscript' });
+              currentX += size * sup.length * 0.45;
+            }
+            i = j;
+          } else if (expr[i] === '_') {
+            // Subscript
+            let sub = '';
+            let j = i + 1;
+            if (expr[j] === '{') {
+              let braceCount = 1;
+              j++;
+              while (j < expr.length && braceCount > 0) {
+                if (expr[j] === '{') braceCount++;
+                if (expr[j] === '}') braceCount--;
+                if (braceCount > 0) sub += expr[j];
+                j++;
+              }
+            } else {
+              while (j < expr.length && /[a-zA-Z0-9]/.test(expr[j])) {
+                sub += expr[j];
+                j++;
+              }
+            }
+            if (sub) {
+              result.push({ text: sub, x: currentX, y: yOffset + size * 0.15, size: size * 0.65, type: 'subscript' });
+              currentX += size * sub.length * 0.45;
+            }
+            i = j;
+          } else if (expr[i] === '{' || expr[i] === '}') {
+            i++;
+          } else if (/[a-zA-Z0-9\s\+\-\*\/\=\(\)\.,]/.test(expr[i])) {
+            result.push({ text: expr[i], x: currentX, y: yOffset, size: size });
+            currentX += size * 0.5;
+            i++;
+          } else {
+            i++;
+          }
+        }
+
+        return { elements: result, width: currentX - xOffset };
+      };
+
+      // Check for fraction first
+      const frac = parseFraction(latex);
+      if (frac) {
+        const { numerator, denominator, remaining } = frac;
+        
+        // Render numerator
+        const numResult = renderExpression(numerator, fontSize * 0.85, x, y);
+        const numWidth = numResult.width;
+        
+        // Render denominator
+        const denResult = renderExpression(denominator, fontSize * 0.85, x, y + fontSize * 1.4);
+        const denWidth = denResult.width;
+        
+        const fracWidth = Math.max(numWidth, denWidth);
+        
+        // Draw fraction bar
+        doc.setDrawColor(0, 0, 0);
+        doc.setLineWidth(0.4);
+        doc.line(x, y + fontSize * 0.6, x + fracWidth, y + fontSize * 0.6);
+        
+        // Center numerator and denominator
+        const numOffset = (fracWidth - numWidth) / 2;
+        const denOffset = (fracWidth - denWidth) / 2;
+        
+        numResult.elements.forEach(el => {
+          doc.setFontSize(el.size);
+          doc.setTextColor(0, 0, 0);
+          doc.text(el.text, el.x + numOffset, el.y);
+        });
+        
+        denResult.elements.forEach(el => {
+          doc.setFontSize(el.size);
+          doc.setTextColor(0, 0, 0);
+          doc.text(el.text, el.x + denOffset, el.y);
+        });
+        
+        // Render remaining expression
+        if (remaining.trim()) {
+          const remResult = renderExpression(remaining, fontSize, x + fracWidth + fontSize * 0.4, y + fontSize * 0.7);
+          remResult.elements.forEach(el => {
+            doc.setFontSize(el.size);
+            doc.setTextColor(0, 0, 0);
+            doc.text(el.text, el.x, el.y);
+          });
+          return fracWidth + remResult.width + fontSize * 0.4;
+        }
+        
+        return fracWidth;
+      }
+
+      // Check for square root
+      const sqrt = parseSqrt(latex);
+      if (sqrt) {
+        const { content, remaining } = sqrt;
+        const contentResult = renderExpression(content, fontSize * 0.85, x + fontSize * 0.35, y);
+        const contentWidth = contentResult.width;
+        
+        // Draw sqrt symbol
+        doc.setDrawColor(0, 0, 0);
+        doc.setLineWidth(0.4);
+        doc.line(x, y + fontSize * 0.35, x + fontSize * 0.15, y + fontSize * 0.35);
+        doc.line(x + fontSize * 0.15, y + fontSize * 0.35, x + fontSize * 0.25, y - fontSize * 0.15);
+        doc.line(x + fontSize * 0.25, y - fontSize * 0.15, x + fontSize * 0.3, y + fontSize * 0.6);
+        doc.line(x + fontSize * 0.3, y + fontSize * 0.6, x + contentWidth + fontSize * 0.35, y + fontSize * 0.6);
+        
+        contentResult.elements.forEach(el => {
+          doc.setFontSize(el.size);
+          doc.setTextColor(0, 0, 0);
+          doc.text(el.text, el.x, el.y);
+        });
+        
+        if (remaining.trim()) {
+          const remResult = renderExpression(remaining, fontSize, x + contentWidth + fontSize * 0.9, y);
+          remResult.elements.forEach(el => {
+            doc.setFontSize(el.size);
+            doc.setTextColor(0, 0, 0);
+            doc.text(el.text, el.x, el.y);
+          });
+          return contentWidth + remResult.width + fontSize * 0.9;
+        }
+        
+        return contentWidth + fontSize * 0.35;
+      }
+
+      // Regular expression
+      const result = renderExpression(latex, fontSize, x, y);
+      result.elements.forEach(el => {
+        doc.setFontSize(el.size);
+        doc.setTextColor(0, 0, 0);
+        doc.text(el.text, el.x, el.y);
+      });
+      
+      return result.width;
+    };
+
     // Title
     doc.setFontSize(24);
     doc.setFont('helvetica', 'bold');
@@ -1203,7 +1678,7 @@ export default function App() {
     yPosition += 15;
 
     // Render blocks
-    cls.blocks.forEach((block, index) => {
+    for (const block of cls.blocks) {
       const tag = block.tag?.toUpperCase();
       const content = block.content || '';
 
@@ -1241,12 +1716,12 @@ export default function App() {
           break;
 
         case 'MATH':
-          doc.setFontSize(14);
+          // Render LaTeX directly to PDF using native jsPDF math renderer
           doc.setFont('times', 'italic');
           doc.setTextColor(220, 38, 38); // Red/pink
-          checkPageBreak(15);
-          doc.text(content, margin, yPosition);
-          yPosition += 12;
+          checkPageBreak(25);
+          const mathWidth = renderMathToPdf(doc, content, margin, yPosition, 14);
+          yPosition += 20;
           break;
 
         case 'CODE':
@@ -1309,7 +1784,7 @@ export default function App() {
 
       // Add spacing between blocks
       yPosition += 5;
-    });
+    }
 
     // Add page numbers
     const totalPages = doc.internal.getNumberOfPages();

@@ -296,6 +296,22 @@ TEACHING STYLE
 Never explain too many ideas at once.
 If the topic is large, split into mini-lessons.
 
+CRITICAL FOR CIRCUIT/ELECTRONICS TOPICS:
+When teaching series circuits, parallel circuits, Ohm's law, or any electrical circuit topic, ALWAYS include a [DIAGRAM] tag - DO NOT use [IMAGE] for these topics.
+When the lesson is specifically about series circuits, use: [DIAGRAM]circuit series[/DIAGRAM]
+When the lesson is specifically about parallel circuits, use: [DIAGRAM]circuit parallel[/DIAGRAM]
+When teaching general circuits or both series and parallel together, use: [DIAGRAM]circuit[/DIAGRAM]
+For transformers, use: [DIAGRAM]transformer[/DIAGRAM] - NOT [IMAGE]
+For diodes, use: [DIAGRAM]diode[/DIAGRAM] - NOT [IMAGE]
+For LEDs, use: [DIAGRAM]led[/DIAGRAM] - NOT [IMAGE]
+For transistors, use: [DIAGRAM]transistor[/DIAGRAM] - NOT [IMAGE]
+For capacitors or RC circuits, use: [DIAGRAM]capacitor[/DIAGRAM] or [DIAGRAM]rc_circuit[/DIAGRAM] - NOT [IMAGE]
+For RLC circuits, use: [DIAGRAM]rlc_circuit[/DIAGRAM] - NOT [IMAGE]
+For voltage dividers, use: [DIAGRAM]voltage_divider[/DIAGRAM] - NOT [IMAGE]
+For Kirchhoff's Current Law, use: [DIAGRAM]kcl[/DIAGRAM] - NOT [IMAGE]
+For Kirchhoff's Voltage Law, use: [DIAGRAM]kvl[/DIAGRAM] - NOT [IMAGE]
+This ensures the diagram renderer shows the correct circuit topology.
+
 ======================================================
 VISUAL AIDS — TWO CATEGORIES & STRICT DIAGRAM RULES
 ======================================================
@@ -307,7 +323,17 @@ A) [DIAGRAM] — Canvas-drawn educational diagrams.
    Supported [DIAGRAM] values and strict concept matching matrix:
    • force_block    : Physics mechanics, forces, friction, gravity, tension, mass on surface, Newton's laws.
    • ray_diagram    : Light, optics, reflection, refraction, lenses (convex/concave), mirrors, principal axis.
-   • circuit        : Electricity, electric circuits, voltage, current, resistors, Ohm's law, series/parallel.
+   • circuit        : Electricity, electric circuits, voltage, current, resistors, Ohm's law, series/parallel. FOR CIRCUIT DIAGRAMS: If teaching series circuits, use [DIAGRAM]circuit series[/DIAGRAM]. If teaching parallel circuits, use [DIAGRAM]circuit parallel[/DIAGRAM]. If teaching general circuits without specific topology, use [DIAGRAM]circuit[/DIAGRAM]. DO NOT use [IMAGE] for circuit topics.
+   • transformer    : Transformers, electromagnetic induction, voltage conversion, power distribution, step-up/step-down transformers.
+   • diode          : Diodes, semiconductors, PN junction, rectification, forward/reverse bias.
+   • led            : Light-emitting diodes, LED circuits, LED indicators.
+   • transistor     : Transistors, BJT, MOSFET, amplification, switching devices.
+   • capacitor      : Capacitors, capacitance, RC circuits, energy storage, filtering.
+   • rc_circuit     : RC circuits, resistor-capacitor networks, time constants, filtering.
+   • rlc_circuit    : RLC circuits, resonance, oscillators, filters.
+   • voltage_divider: Voltage divider circuits, potentiometers, signal attenuation.
+   • kcl            : Kirchhoff's Current Law, node analysis, current conservation.
+   • kvl            : Kirchhoff's Voltage Law, loop analysis, voltage conservation.
    • flow_diagram   : Sequential processes, algorithms, logic workflows, decision trees, lifecycle steps.
    • osi_layers     : Computer networking, OSI 7-layer model, network protocol stacks, TCP/IP layers.
    • water_cycle    : Environmental science, hydrology, water cycle (evaporation, condensation, precipitation, runoff).
