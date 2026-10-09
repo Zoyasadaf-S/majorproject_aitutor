@@ -6,7 +6,6 @@ pydantic
 pymupdf
 python-docx
 python-pptx
-sentence-transformers
 python-multipart
 numpy
 pillow
@@ -14,4 +13,3 @@ edge-tts
 passlib[bcrypt]
 bcrypt<4.1
 pyjwt
-easyocr
