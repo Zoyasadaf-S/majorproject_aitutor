@@ -409,6 +409,22 @@ body, html, #root {
   color: #4ade80;
 }
 
+.download-lesson-btn {
+  background: none;
+  border: none;
+  color: #8da394;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 8px 12px;
+  transition: color 0.2s;
+  white-space: nowrap;
+}
+
+.download-lesson-btn:hover {
+  color: #4ade80;
+}
+
 .status-meta-card {
   background-color: rgba(17, 49, 35, 0.8);
   border: 1px solid #1a4733;
