@@ -154,6 +154,7 @@ init_db()
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_QUIZ_API_KEY = os.getenv("GROQ_QUIZ_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL   = "openai/gpt-oss-20b"
 UNSPLASH_API_KEY = os.getenv("UNSPLASH_API_KEY")
@@ -986,6 +987,44 @@ async def complete_groq(messages: List[Dict[str, str]], system: str) -> str:
         raise HTTPException(status_code=502, detail="LLM returned an empty completion.")
     return content.strip()
 
+
+async def complete_groq_quiz(messages: List[Dict[str, str]], system: str) -> str:
+    """Return one complete model response for quiz generation using the dedicated quiz API key."""
+    if not GROQ_QUIZ_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Quiz generation is not configured. Add GROQ_QUIZ_API_KEY to your backend .env file and restart the server."
+        )
+    headers = {
+        "Authorization": f"Bearer {GROQ_QUIZ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "system", "content": system}] + messages,
+        "stream": False,
+        "temperature": 0.35
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(GROQ_API_URL, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        logger.exception("Quiz LLM request could not connect")
+        raise HTTPException(status_code=502, detail="The quiz language model service is unreachable.") from exc
+    if response.status_code == 429:
+        detail = groq_error_detail(response.status_code, response.content, response.headers.get("retry-after"))
+        logger.warning("Groq quiz completion request rejected: status=429 model=%s detail=%s", GROQ_MODEL, detail)
+        raise HTTPException(status_code=429, detail=detail)
+    if response.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Quiz LLM request failed ({response.status_code}).")
+    try:
+        content = response.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Quiz LLM returned an invalid completion.") from exc
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(status_code=502, detail="Quiz LLM returned an empty completion.")
+    return content.strip()
+
 # ── Document & Image API Endpoints ───────────────────────────────────────────
 @app.post("/api/documents/upload")
 async def upload_document(
@@ -1807,29 +1846,6 @@ def _build_local_quiz(source, topic, difficulty):
         raise ValueError("Could not construct five valid questions")
     return output
 
-async def _post_gemini_quiz_with_retries(client, endpoint, headers, payload):
-    """Retry transient Gemini overload/rate-limit responses with bounded backoff."""
-    max_attempts = 4  # initial attempt plus three retries
-    response = None
-    for attempt in range(max_attempts):
-        response = await client.post(endpoint, headers=headers, json=payload)
-        if response.status_code not in {429, 503} or attempt == max_attempts - 1:
-            return response
-
-        delay_seconds = min(2 ** attempt, 4)
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                delay_seconds = min(max(delay_seconds, float(retry_after)), 5)
-            except ValueError:
-                pass
-        logger.warning(
-            "Gemini quiz request returned %s; retry %s/%s in %ss",
-            response.status_code, attempt + 1, max_attempts - 1, delay_seconds
-        )
-        await asyncio.sleep(delay_seconds)
-    return response
-
 
 # ── /api/quiz ─────────────────────────────────────────────────────────────────
 @app.post("/api/quiz")
@@ -1866,15 +1882,6 @@ async def generate_topic_quiz(req: QuizRequest, authorization: Optional[str] = H
             conn.close()
 
     source = "\n\n".join(part for part in source_parts if isinstance(part, str) and part.strip())
-    # Gemini is used only for quiz generation. The existing teach_system and
-    # other Groq-backed endpoints are intentionally left unchanged.
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-    if not gemini_api_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Gemini is not configured. Add GEMINI_API_KEY to your backend .env file and restart the server."
-        )
 
     difficulty_guidance = {
         "Easy": "Focus on foundational understanding, definitions, and direct application.",
@@ -1891,7 +1898,7 @@ async def generate_topic_quiz(req: QuizRequest, authorization: Optional[str] = H
         if source.strip()
         else ""
     )
-    prompt = f"""You are an expert academic assessment designer creating a high-quality quiz for an adaptive AI tutor.
+    system_prompt = f"""You are an expert academic assessment designer creating a high-quality quiz for an adaptive AI tutor.
 Subject: {req.subject}
 Topic: {req.topic}
 Difficulty: {difficulty}
@@ -1913,39 +1920,10 @@ Requirements:
 Return a JSON array with this exact shape:
 [{{"id":"1","question":"...","options":[{{"id":"A","text":"..."}},{{"id":"B","text":"..."}},{{"id":"C","text":"..."}},{{"id":"D","text":"..."}}],"correct_id":"B","explanation":"..."}}]
 """
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.35,
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 5000
-        }
-    }
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await _post_gemini_quiz_with_retries(
-                client,
-                endpoint,
-                headers={"x-goog-api-key": gemini_api_key, "Content-Type": "application/json"},
-                payload=payload
-            )
-        if response.status_code != 200:
-            logger.error("Gemini quiz request failed: status=%s body=%s", response.status_code, response.text[:1000])
-            if response.status_code == 429:
-                raise HTTPException(status_code=429, detail="Gemini remained rate-limited after automatic retries. Check its usage limits and retry after reset.")
-            if response.status_code == 503:
-                raise HTTPException(status_code=503, detail="Gemini remained unavailable after automatic retries. Please retry shortly.")
-            if response.status_code in {401, 403}:
-                raise HTTPException(status_code=502, detail="Gemini rejected the configured API key or its permissions.")
-            raise HTTPException(status_code=502, detail=f"Gemini quiz generation failed (HTTP {response.status_code}). Check the configured model and try again.")
+    user_message = "Generate the quiz as specified in the system prompt."
 
-        response_data = response.json()
-        candidates = response_data.get("candidates") or []
-        parts = (candidates[0].get("content", {}).get("parts", []) if candidates else [])
-        content = "".join(part.get("text", "") for part in parts if isinstance(part, dict)).strip()
-        if not content:
-            raise ValueError("Gemini returned an empty response")
+    try:
+        content = await complete_groq_quiz([{"role": "user", "content": user_message}], system_prompt)
         generated = json.loads(content)
         if not isinstance(generated, list) or len(generated) != 5:
             raise ValueError("Quiz must contain exactly five questions")
@@ -1981,13 +1959,8 @@ Return a JSON array with this exact shape:
     except HTTPException:
         raise
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.exception("Gemini returned an invalid quiz response")
-        raise HTTPException(status_code=502, detail="Gemini returned an invalid quiz. Please retry.") from exc
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Gemini took too long to generate the quiz. Please retry.") from exc
-    except httpx.HTTPError as exc:
-        logger.exception("Gemini quiz network error")
-        raise HTTPException(status_code=502, detail="Could not reach Gemini. Please retry.") from exc
+        logger.exception("Quiz LLM returned an invalid quiz response")
+        raise HTTPException(status_code=502, detail="Quiz generation returned an invalid quiz. Please retry.") from exc
 
 # ── /api/practice ─────────────────────────────────────────────────────────────
 @app.post("/api/practice")

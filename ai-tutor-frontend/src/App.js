@@ -687,6 +687,7 @@ export default function App() {
   const lastCompletedBlockIdRef = useRef(null);
   const audioQueueRef = useRef(audioQueue);
   const ttsAbortControllersRef = useRef(new Set());
+  const [useBrowserTts, setUseBrowserTts] = useState(false);
 
   const rawBufferRef = useRef('');
   const processedUpToRef = useRef(0);
@@ -735,6 +736,9 @@ export default function App() {
       activeAudio.removeAttribute('src');
       activeAudio.load();
     }
+    if (currentUtteranceRef.current instanceof SpeechSynthesisUtterance) {
+      window.speechSynthesis.cancel();
+    }
     currentAudioBlockIdRef.current = null;
     setAudioQueue(prev => {
       prev.forEach(item => {
@@ -775,73 +779,150 @@ export default function App() {
     setBlocks([]);
   };
 
+  const pickBrowserVoice = (languageCode) => {
+    if (!window.speechSynthesis) return null;
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return null;
+
+    const code = languageCode?.toLowerCase()?.slice(0, 2) || 'en';
+
+    const exactMatch = voices.find(v => v.lang.toLowerCase().startsWith(code));
+    if (exactMatch) return exactMatch;
+
+    const fallbackMap = {
+      'hi': voices.find(v => v.lang.toLowerCase().startsWith('hi')),
+      'kn': voices.find(v => v.lang.toLowerCase().startsWith('kn')),
+      'en': voices.find(v => v.lang.toLowerCase().startsWith('en'))
+    };
+
+    return fallbackMap[code] || voices.find(v => v.lang.toLowerCase().startsWith('en')) || voices[0];
+  };
+
   useEffect(() => {
     if (isPaused || audioNeedsUserGesture) return;
 
     if (!isPlaying && audioQueue.length > 0) {
       const nextItem = audioQueue[0];
-      
+
       if (nextItem.streamId && nextItem.streamId !== currentStreamIdRef.current) {
         if (nextItem.url) URL.revokeObjectURL(nextItem.url);
         setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
         return;
       }
 
-      if (!nextItem.ready) return; 
+      if (!nextItem.ready) return;
 
-      if (!nextItem.url) {
-        setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
-        return;
-      }
+      const useBrowser = useBrowserTts || !nextItem.url;
 
-      const audio = new Audio(nextItem.url);
-      currentUtteranceRef.current = audio;
-      currentAudioBlockIdRef.current = nextItem.blockId || null;
-
-      const releaseCurrentAudio = (errorMessage = '') => {
-        if (errorMessage) setAudioError(errorMessage);
-        setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
-        setIsPlaying(false);
-        if (currentUtteranceRef.current === audio) {
-          currentUtteranceRef.current = null;
-          currentAudioBlockIdRef.current = null;
-        }
-        audio.pause();
-        audio.removeAttribute('src');
-        audio.load();
-        URL.revokeObjectURL(nextItem.url);
-      };
-
-      audio.onended = () => {
-        setAudioError('');
-        if (nextItem.blockId) {
-          lastCompletedBlockIdRef.current = nextItem.blockId;
-          setLastCompletedBlockId(nextItem.blockId);
-        }
-        releaseCurrentAudio();
-      };
-      
-      audio.onerror = () => {
-        releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
-      };
-
-      audio.play().then(() => {
-        const playbackStartTime = Date.now();
-        console.log(`[TTS_TIMING] audio playback started at ${playbackStartTime}, blockId: ${nextItem.blockId}`);
-        setAudioError('');
-        setIsPlaying(true);
-      }).catch(e => {
-        console.error("Audio play failed", e);
-        setIsPlaying(false);
-        if (e.name === 'NotAllowedError') {
-          setAudioNeedsUserGesture(true);
-          setAudioError('Select Play Voice to start the lesson narration.');
+      if (useBrowser) {
+        if (!nextItem.text || !window.speechSynthesis) {
+          setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
           return;
         }
-        releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
-      });
+
+        const voice = pickBrowserVoice(nextItem.language || 'en');
+        if (!voice) {
+          setAudioError('No suitable voice available for text-to-speech.');
+          setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(nextItem.text);
+        utterance.voice = voice;
+        utterance.rate = 1.25;
+        utterance.pitch = 1;
+
+        currentUtteranceRef.current = utterance;
+        currentAudioBlockIdRef.current = nextItem.blockId || null;
+
+        const releaseUtterance = (errorMessage = '') => {
+          if (errorMessage) setAudioError(errorMessage);
+          setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
+          setIsPlaying(false);
+          if (currentUtteranceRef.current === utterance) {
+            currentUtteranceRef.current = null;
+            currentAudioBlockIdRef.current = null;
+          }
+          window.speechSynthesis.cancel();
+        };
+
+        utterance.onend = () => {
+          setAudioError('');
+          if (nextItem.blockId) {
+            lastCompletedBlockIdRef.current = nextItem.blockId;
+            setLastCompletedBlockId(nextItem.blockId);
+          }
+          releaseUtterance();
+        };
+
+        utterance.onerror = (e) => {
+          console.error('Browser TTS error:', e);
+          releaseUtterance('Text-to-speech failed. You can continue reading the lesson.');
+        };
+
+        try {
+          window.speechSynthesis.speak(utterance);
+          setAudioError('');
+          setIsPlaying(true);
+        } catch (e) {
+          console.error('Browser TTS speak failed', e);
+          releaseUtterance('Text-to-speech failed. You can continue reading the lesson.');
+        }
+      } else {
+        if (!nextItem.url) {
+          setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
+          return;
+        }
+
+        const audio = new Audio(nextItem.url);
+        currentUtteranceRef.current = audio;
+        currentAudioBlockIdRef.current = nextItem.blockId || null;
+
+        const releaseCurrentAudio = (errorMessage = '') => {
+          if (errorMessage) setAudioError(errorMessage);
+          setAudioQueue(prev => prev.filter(item => item.id !== nextItem.id));
+          setIsPlaying(false);
+          if (currentUtteranceRef.current === audio) {
+            currentUtteranceRef.current = null;
+            currentAudioBlockIdRef.current = null;
+          }
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+          URL.revokeObjectURL(nextItem.url);
+        };
+
+        audio.onended = () => {
+          setAudioError('');
+          if (nextItem.blockId) {
+            lastCompletedBlockIdRef.current = nextItem.blockId;
+            setLastCompletedBlockId(nextItem.blockId);
+          }
+          releaseCurrentAudio();
+        };
+
+        audio.onerror = () => {
+          releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
+        };
+
+        audio.play().then(() => {
+          const playbackStartTime = Date.now();
+          console.log(`[TTS_TIMING] audio playback started at ${playbackStartTime}, blockId: ${nextItem.blockId}`);
+          setAudioError('');
+          setIsPlaying(true);
+        }).catch(e => {
+          console.error("Audio play failed", e);
+          setIsPlaying(false);
+          if (e.name === 'NotAllowedError') {
+            setAudioNeedsUserGesture(true);
+            setAudioError('Select Play Voice to start the lesson narration.');
+            return;
+          }
+          releaseCurrentAudio('Audio playback failed. You can continue reading the lesson.');
+        });
+      }
     }
-  }, [audioQueue, isPlaying, isPaused, audioNeedsUserGesture]);
+  }, [audioQueue, isPlaying, isPaused, audioNeedsUserGesture, useBrowserTts]);
 
   const fetchHistory = async () => {
     const token = localStorage.getItem('cognilearn_token');
@@ -908,6 +989,16 @@ export default function App() {
   }, [isAuthenticated, started]);
 
   useEffect(() => {
+    if (window.speechSynthesis) {
+      const loadVoices = () => {
+        window.speechSynthesis.getVoices();
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+  }, []);
+
+  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
@@ -920,6 +1011,9 @@ export default function App() {
       if (currentUtteranceRef.current instanceof Audio) {
         currentUtteranceRef.current.pause();
         currentUtteranceRef.current.removeAttribute('src');
+      }
+      if (window.speechSynthesis) {
+        window.speechSynthesis.cancel();
       }
       audioQueueRef.current.forEach(item => {
         if (item.url) URL.revokeObjectURL(item.url);
@@ -936,27 +1030,39 @@ export default function App() {
   }, [selectedImage?.previewUrl]);
 
   const playBlockedAudio = () => {
-    const audio = currentUtteranceRef.current;
-    if (!(audio instanceof Audio)) {
+    const current = currentUtteranceRef.current;
+    if (current instanceof Audio) {
+      setAudioError('');
+      setIsPaused(false);
+      current.play().then(() => {
+        setAudioNeedsUserGesture(false);
+        setIsPlaying(true);
+      }).catch(error => {
+        console.error('Narration could not be resumed', error);
+        setIsPlaying(false);
+        if (error.name === 'NotAllowedError') {
+          setAudioNeedsUserGesture(true);
+          setAudioError('Narration is still blocked by the browser. Use Play Voice after interacting with the page.');
+        } else {
+          setAudioError('Audio playback failed. You can continue reading the lesson.');
+        }
+      });
+    } else if (current instanceof SpeechSynthesisUtterance) {
+      setAudioError('');
+      setIsPaused(false);
+      setAudioNeedsUserGesture(false);
+      try {
+        window.speechSynthesis.resume();
+        setIsPlaying(true);
+      } catch (error) {
+        console.error('Browser TTS resume failed', error);
+        setIsPlaying(false);
+        setAudioError('Text-to-speech failed. You can continue reading the lesson.');
+      }
+    } else {
       setAudioNeedsUserGesture(false);
       setIsPaused(false);
-      return;
     }
-    setAudioError('');
-    setIsPaused(false);
-    audio.play().then(() => {
-      setAudioNeedsUserGesture(false);
-      setIsPlaying(true);
-    }).catch(error => {
-      console.error('Narration could not be resumed', error);
-      setIsPlaying(false);
-      if (error.name === 'NotAllowedError') {
-        setAudioNeedsUserGesture(true);
-        setAudioError('Narration is still blocked by the browser. Use Play Voice after interacting with the page.');
-      } else {
-        setAudioError('Audio playback failed. You can continue reading the lesson.');
-      }
-    });
   };
 
   const togglePause = () => {
@@ -976,6 +1082,12 @@ export default function App() {
               setAudioError('Audio playback failed. You can continue reading the lesson.');
             }
           });
+        }
+      } else if (currentUtteranceRef.current instanceof SpeechSynthesisUtterance) {
+        if (nextPaused) {
+          window.speechSynthesis.pause();
+        } else {
+          window.speechSynthesis.resume();
         }
       }
       return nextPaused;
@@ -1118,7 +1230,7 @@ export default function App() {
     if (newTtsItems.length > 0 && streamId === currentStreamIdRef.current) {
       const langForTts = detectedLanguageRef.current || 'en';
       newTtsItems.forEach(({ id, blockId, cleanText, explainReceivedTime }) => {
-        setAudioQueue(q => [...q, { id, blockId, streamId, ready: false, url: null }]);
+        setAudioQueue(q => [...q, { id, blockId, streamId, ready: false, url: null, text: null, language: null }]);
 
         // OPTIMIZATION: Remove sequential chaining. Start TTS immediately for each EXPLAIN.
         // The audio queue ensures correct playback order regardless of when TTS completes.
@@ -1158,9 +1270,10 @@ export default function App() {
             });
           } catch (err) {
             if (err.name === 'AbortError' || streamId !== currentStreamIdRef.current) return;
-            console.error('TTS fetch failed', err);
-            setAudioError('Audio generation failed. You can continue reading the lesson.');
-            setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url: null } : item));
+            console.error('TTS fetch failed, falling back to browser TTS', err);
+            setUseBrowserTts(true);
+            setAudioError('Server audio unavailable. Using browser text-to-speech.');
+            setAudioQueue(q => q.map(item => item.id === id ? { ...item, ready: true, url: null, text: cleanText, language: langForTts } : item));
           } finally {
             ttsAbortControllersRef.current.delete(controller);
           }
