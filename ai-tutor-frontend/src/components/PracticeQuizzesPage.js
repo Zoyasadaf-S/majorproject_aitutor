@@ -30,6 +30,7 @@ export default function PracticeQuizzesPage({ activeTopic, activeSubject, active
   const [isLoadingQuiz, setIsLoadingQuiz] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [difficulty, setDifficulty] = useState('Medium');
+  const [quizLanguage, setQuizLanguage] = useState('English');
 
   const resetState = () => {
     setCurrentIndex(0);
@@ -59,7 +60,7 @@ export default function PracticeQuizzesPage({ activeTopic, activeSubject, active
           'Content-Type': 'application/json',
           ...(localStorage.getItem('cognilearn_token') ? { 'Authorization': `Bearer ${localStorage.getItem('cognilearn_token')}` } : {})
         },
-        body: JSON.stringify({ topic: topicName, subject: subj, difficulty: quizDifficulty, language: activeLanguage, document_id: documentId || null })
+        body: JSON.stringify({ topic: topicName, subject: subj, difficulty: quizDifficulty, language: quizLanguage, document_id: documentId || null })
       });
       if (res.ok) {
         const generated = await res.json();
@@ -191,6 +192,29 @@ export default function PracticeQuizzesPage({ activeTopic, activeSubject, active
           {['Easy', 'Medium', 'Hard'].map(level => (
             <button key={level} type="button" aria-pressed={difficulty === level} onClick={() => setDifficulty(level)} style={{ padding: '9px 18px', borderRadius: '7px', border: difficulty === level ? '1px solid #f59e0b' : '1px solid #3a3a3a', background: difficulty === level ? 'rgba(245,158,11,.16)' : '#202020', color: difficulty === level ? '#fbbf24' : '#d1d5db', fontWeight: 700, cursor: 'pointer' }}>{level}</button>
           ))}
+        </div>
+        <div style={{ marginBottom: '14px', color: '#d1d5db', fontSize: '13px', fontWeight: 700 }}>Choose quiz language</div>
+        <div style={{ marginBottom: '16px' }}>
+          <select
+            value={quizLanguage}
+            onChange={(e) => setQuizLanguage(e.target.value)}
+            style={{
+              backgroundColor: '#222222',
+              color: '#ffffff',
+              border: '1px solid #333333',
+              borderRadius: '6px',
+              padding: '10px 14px',
+              fontSize: '14px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              outline: 'none',
+              minWidth: '200px'
+            }}
+          >
+            <option value="English">English</option>
+            <option value="हिंदी">हिंदी (Hindi)</option>
+            <option value="ಕನ್ನಡ">ಕನ್ನಡ (Kannada)</option>
+          </select>
         </div>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
           <input

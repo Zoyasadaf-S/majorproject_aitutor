@@ -59,3 +59,55 @@ test('preserves quiz code, text, math and explanations through final review', as
   expect(screen.getByText(/They are separate\./)).toBeInTheDocument();
   expect(screen.getByText('Final explanation.')).toBeInTheDocument();
 });
+
+test('language dropdown sends selected language to backend', async () => {
+  render(<PracticeQuizzesPage onPracticeCompleted={jest.fn()} />);
+  
+  const languageSelect = screen.getByRole('combobox');
+  expect(languageSelect).toBeInTheDocument();
+  expect(languageSelect.value).toBe('English');
+  
+  fireEvent.change(languageSelect, { target: { value: 'हिंदी' } });
+  expect(languageSelect.value).toBe('हिंदी');
+  
+  fireEvent.change(screen.getByPlaceholderText(/enter a topic/i), { target: { value: 'Physics' } });
+  fireEvent.click(screen.getByText('START 5-QUESTION QUIZ'));
+  
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/quiz'),
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"language":"हिंदी"')
+      })
+    );
+  });
+});
+
+test('language dropdown defaults to English', async () => {
+  render(<PracticeQuizzesPage onPracticeCompleted={jest.fn()} />);
+  
+  const languageSelect = screen.getByRole('combobox');
+  expect(languageSelect.value).toBe('English');
+});
+
+test('language dropdown supports Kannada selection', async () => {
+  render(<PracticeQuizzesPage onPracticeCompleted={jest.fn()} />);
+  
+  const languageSelect = screen.getByRole('combobox');
+  fireEvent.change(languageSelect, { target: { value: 'ಕನ್ನಡ' } });
+  expect(languageSelect.value).toBe('ಕನ್ನಡ');
+  
+  fireEvent.change(screen.getByPlaceholderText(/enter a topic/i), { target: { value: 'Math' } });
+  fireEvent.click(screen.getByText('START 5-QUESTION QUIZ'));
+  
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/quiz'),
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"language":"ಕನ್ನಡ"')
+      })
+    );
+  });
+});
