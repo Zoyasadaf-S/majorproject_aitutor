@@ -988,8 +988,13 @@ async def complete_groq(messages: List[Dict[str, str]], system: str) -> str:
     return content.strip()
 
 
-async def complete_groq_quiz(messages: List[Dict[str, str]], system: str) -> str:
-    """Return one complete model response for quiz generation using the dedicated quiz API key."""
+async def complete_groq_quiz(messages: List[Dict[str, str]], system: str, json_mode: bool = True) -> str:
+    """Return one complete model response for quiz generation using the dedicated quiz API key.
+
+    json_mode=True asks Groq for a JSON object (response_format=json_object).
+    If your model/version rejects it (HTTP 400 json_validate_failed), call with json_mode=False;
+    the tolerant parser in _extract_quiz_list still handles fenced or wrapped output.
+    """
     if not GROQ_QUIZ_API_KEY:
         raise HTTPException(
             status_code=503,
@@ -1003,10 +1008,14 @@ async def complete_groq_quiz(messages: List[Dict[str, str]], system: str) -> str
         "model": GROQ_MODEL,
         "messages": [{"role": "system", "content": system}] + messages,
         "stream": False,
-        "temperature": 0.35
+        "temperature": 0.35,
+        "reasoning_effort": "low",          # leave more of the budget for the actual answer
+        "max_completion_tokens": 6000,      # avoid truncated JSON
     }
+    if json_mode:
+        payload["response_format"] = {"type": "json_object"}  # must return an object, not a bare array
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=90.0) as client:
             response = await client.post(GROQ_API_URL, headers=headers, json=payload)
     except httpx.HTTPError as exc:
         logger.exception("Quiz LLM request could not connect")
@@ -1016,6 +1025,7 @@ async def complete_groq_quiz(messages: List[Dict[str, str]], system: str) -> str
         logger.warning("Groq quiz completion request rejected: status=429 model=%s detail=%s", GROQ_MODEL, detail)
         raise HTTPException(status_code=429, detail=detail)
     if response.status_code != 200:
+        logger.warning("Quiz LLM failed: %s %s", response.status_code, response.text[:500])
         raise HTTPException(status_code=502, detail=f"Quiz LLM request failed ({response.status_code}).")
     try:
         content = response.json()["choices"][0]["message"]["content"]
@@ -1040,13 +1050,13 @@ async def upload_document(
             status_code=400,
             detail="Unsupported file format. Please upload a PDF, DOCX, PPTX, TXT, or MD file."
         )
-        
+
     content = await file.read(25 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
     if len(content) > 25 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File is too large. Please upload a file smaller than 25MB.")
-        
+
     try:
         res = process_and_store_document(user["id"], filename, content)
         return {
@@ -1100,13 +1110,13 @@ async def upload_image(
             status_code=400,
             detail="Unsupported image format. Please upload a PNG, JPG, JPEG, WEBP, BMP, or GIF image."
         )
-        
+
     content = await file.read(15 * 1024 * 1024 + 1)
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded image is empty.")
     if len(content) > 15 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="Image file is too large. Please upload an image under 15MB.")
-        
+
     try:
         res = process_and_store_image(user["id"], filename, content)
         return {
@@ -1139,13 +1149,13 @@ async def start_lesson(req: TeachRequest, raw_request: Request, authorization: O
 
     topic_str = (req.topic or "").strip()
     subject_hint = f" (Subject hint: {req.subject})" if req.subject and req.subject != "General" else ""
-    
+
     system_prompt = TEACH_SYSTEM + subject_teaching_guidance(req.subject)
     messages = []
     mode = "text"
     num_chunks = 0
     context_chars = 0
-    
+
     # ── MODE DETERMINATION ───────────────────────────────────────────────────
     if req.document_id and user_id:
         if topic_str:
@@ -1158,7 +1168,7 @@ async def start_lesson(req: TeachRequest, raw_request: Request, authorization: O
                     raise HTTPException(status_code=422, detail="No readable content was found for this topic in the uploaded document. Try a different topic or upload another file.")
                 chunks_str = "\n\n".join([f"[Source Page {c['page_number']}]: {c['text']}" for c in retrieved])
                 context_chars = len(chunks_str)
-                
+
                 source_instruction = f"""
 ======================================================
 SOURCE-GROUNDED TEACHING FROM UPLOADED LEARNING MATERIAL
@@ -1276,7 +1286,7 @@ INSTRUCTIONS FOR TEACHER:
 
     # Dev token logging
     print(f"[TOKEN_LOG] mode={mode} | doc_id={req.document_id} | image_id={req.image_id} | num_chunks={num_chunks} | context_chars={context_chars} | model={GROQ_MODEL}")
-    
+
     return StreamingResponse(
         stream_groq(messages, system_prompt, raw_request),
         media_type="text/event-stream"
@@ -1847,6 +1857,70 @@ def _build_local_quiz(source, topic, difficulty):
     return output
 
 
+# ── Tolerant quiz parsing / normalization ─────────────────────────────────────
+def _extract_quiz_list(content: str) -> list:
+    """Pull the list of questions out of the model output, tolerating fences, preambles and wrapper objects."""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.I)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # grab the outermost object or array
+        m = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", text)
+        if not m:
+            raise ValueError("No JSON found in model output")
+        data = json.loads(m.group(1), strict=False)  # strict=False tolerates raw newlines inside strings
+    if isinstance(data, dict):
+        data = data.get("questions") or next((v for v in data.values() if isinstance(v, list)), None)
+    if not isinstance(data, list):
+        raise ValueError("Quiz JSON is not a list")
+    return data
+
+
+def _normalize_quiz(generated: list) -> list:
+    """Validate and normalize into exactly five questions with A-D option ids."""
+    if len(generated) < 5:
+        raise ValueError(f"Only {len(generated)} questions returned")
+    out, seen = [], set()
+    for item in generated:
+        try:
+            q = str(item["question"]).strip()
+            expl = str(item.get("explanation") or "").strip()
+            opts = item["options"]
+            # accept either [{"id","text"}] or ["a","b","c","d"]
+            if opts and isinstance(opts[0], str):
+                opts = [{"id": "ABCD"[i], "text": t} for i, t in enumerate(opts[:4])]
+            if len(opts) != 4:
+                continue
+            # force ids to A-D in order (handles localized / lowercase ids)
+            old_ids = [str(o.get("id", "")).strip() for o in opts]
+            texts = [str(o.get("text", "")).strip() for o in opts]
+            cid = str(item.get("correct_id", "")).strip()
+            if cid in old_ids:
+                idx = old_ids.index(cid)
+            elif len(cid) == 1 and cid.upper() in "ABCD":
+                idx = "ABCD".index(cid.upper())
+            else:
+                continue
+            if not q or any(not t for t in texts) or len(set(texts)) != 4:
+                continue
+            fp = re.sub(r"\W+", " ", q.casefold()).strip()
+            if fp in seen:
+                continue
+            seen.add(fp)
+            out.append({
+                "id": str(len(out) + 1),
+                "question": q,
+                "options": [{"id": "ABCD"[i], "text": t} for i, t in enumerate(texts)],
+                "correct_id": "ABCD"[idx],
+                "explanation": expl or "Review the correct answer above."
+            })
+        except (KeyError, TypeError, AttributeError, IndexError):
+            continue
+        if len(out) == 5:
+            return out
+    raise ValueError(f"Only {len(out)} valid questions after normalization")
+
+
 # ── /api/quiz ─────────────────────────────────────────────────────────────────
 @app.post("/api/quiz")
 async def generate_topic_quiz(req: QuizRequest, authorization: Optional[str] = Header(None)):
@@ -1911,56 +1985,33 @@ Requirements:
 - Assess different learning objectives; do not repeat the same concept in different wording.
 - Use a thoughtful mix of recall, conceptual understanding, and application appropriate to the requested difficulty.
 - Every question must have exactly four plausible options with IDs A, B, C, D.
-- Exactly one option must be correct.
+- Use the letters A, B, C, D as option ids and as correct_id even when the language is not English.
+- Exactly one option must be correct, and the four option texts must all be different.
 - Include a concise but instructive explanation that explains why the correct answer is right.
 - Keep all question text, options, and explanations in {req.language}.
-- For code questions, preserve code formatting and use escaped newlines in JSON strings.
-- Do not include markdown fences or any text outside the JSON.
+- For code questions, preserve code formatting and use escaped newlines (\\n) in JSON strings.
+- Return only a JSON object. Do not include markdown fences or any text outside the JSON.
 
-Return a JSON array with this exact shape:
-[{{"id":"1","question":"...","options":[{{"id":"A","text":"..."}},{{"id":"B","text":"..."}},{{"id":"C","text":"..."}},{{"id":"D","text":"..."}}],"correct_id":"B","explanation":"..."}}]
+Return a JSON object with this exact shape:
+{{"questions":[{{"id":"1","question":"...","options":[{{"id":"A","text":"..."}},{{"id":"B","text":"..."}},{{"id":"C","text":"..."}},{{"id":"D","text":"..."}}],"correct_id":"B","explanation":"..."}}]}}
 """
     user_message = "Generate the quiz as specified in the system prompt."
 
-    try:
-        content = await complete_groq_quiz([{"role": "user", "content": user_message}], system_prompt)
-        generated = json.loads(content)
-        if not isinstance(generated, list) or len(generated) != 5:
-            raise ValueError("Quiz must contain exactly five questions")
-
-        normalized = []
-        seen_questions = set()
-        for index, item in enumerate(generated):
-            if not isinstance(item, dict):
-                raise ValueError("Question is not an object")
-            question = item.get("question")
-            options = item.get("options")
-            correct_id = item.get("correct_id")
-            explanation = item.get("explanation")
-            if not isinstance(question, str) or not question.strip() or not isinstance(explanation, str) or not explanation.strip():
-                raise ValueError("Question or explanation is missing")
-            fingerprint = re.sub(r"\W+", " ", question.casefold()).strip()
-            if fingerprint in seen_questions:
-                raise ValueError("Duplicate question")
-            seen_questions.add(fingerprint)
-            if not isinstance(options, list) or len(options) != 4 or any(not isinstance(option, dict) for option in options):
-                raise ValueError("Each question must have four options")
-            option_ids = [option.get("id") for option in options]
-            option_texts = [option.get("text") for option in options]
-            if set(option_ids) != {"A", "B", "C", "D"} or len(set(option_texts)) != 4:
-                raise ValueError("Options must be four distinct A-D choices")
-            if correct_id not in option_ids or any(not isinstance(text, str) or not text.strip() for text in option_texts):
-                raise ValueError("Correct answer or option text is invalid")
-            normalized.append({
-                "id": str(index + 1), "question": question, "options": options,
-                "correct_id": correct_id, "explanation": explanation
-            })
-        return normalized
-    except HTTPException:
-        raise
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.exception("Quiz LLM returned an invalid quiz response")
-        raise HTTPException(status_code=502, detail="Quiz generation returned an invalid quiz. Please retry.") from exc
+    last_error = None
+    for attempt in range(3):
+        content = ""
+        try:
+            content = await complete_groq_quiz([{"role": "user", "content": user_message}], system_prompt)
+            return _normalize_quiz(_extract_quiz_list(content))
+        except HTTPException as exc:
+            if exc.status_code in (429, 503):
+                raise
+            last_error = exc
+            logger.warning("Quiz attempt %d failed: %s", attempt + 1, exc.detail)
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            last_error = exc
+            logger.warning("Quiz attempt %d invalid: %s | raw[:400]=%r", attempt + 1, exc, content[:400])
+    raise HTTPException(status_code=502, detail="Quiz generation returned an invalid quiz. Please retry.") from last_error
 
 # ── /api/practice ─────────────────────────────────────────────────────────────
 @app.post("/api/practice")
