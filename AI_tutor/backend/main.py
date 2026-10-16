@@ -112,6 +112,8 @@ def init_db():
     practice_cols = [col[1] for col in c.fetchall()]
     if "user_id" not in practice_cols:
         c.execute("ALTER TABLE practice_progress ADD COLUMN user_id TEXT DEFAULT 'demo-user-id'")
+    if "details" not in practice_cols:
+        c.execute("ALTER TABLE practice_progress ADD COLUMN details TEXT")
 
     # 4. Login activity tracking table
     c.execute('''
@@ -531,6 +533,7 @@ class PracticeProgressItem(BaseModel):
     score: int
     total: int
     date: str
+    details: Optional[Dict[str, Any]] = None   # difficulty, language, answers[] (full report)
 
 class UserRegisterRequest(BaseModel):
     name: str
@@ -2017,10 +2020,15 @@ Return a JSON object with this exact shape:
 @app.post("/api/practice")
 async def save_practice_progress(item: PracticeProgressItem, authorization: Optional[str] = Header(None)):
     user = get_current_user(authorization)
+    details_json = json.dumps(item.details) if item.details else None
+    if details_json and len(details_json) > 500_000:
+        raise HTTPException(status_code=413, detail="Quiz report is too large to save.")
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO practice_progress (id, user_id, topic, subject, score, total, date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (item.id, user["id"], item.topic, item.subject, item.score, item.total, item.date))
+    c.execute(
+        "INSERT OR REPLACE INTO practice_progress (id, user_id, topic, subject, score, total, date, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (item.id, user["id"], item.topic, item.subject, item.score, item.total, item.date, details_json)
+    )
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -2030,18 +2038,37 @@ async def get_practice_progress(authorization: Optional[str] = Header(None)):
     user = get_current_user(authorization)
     conn = sqlite3.connect("cognilearn.db")
     c = conn.cursor()
-    c.execute("SELECT id, topic, subject, score, total, date FROM practice_progress WHERE user_id = ? ORDER BY date DESC", (user["id"],))
+    # rowid DESC = newest first (the date column is a locale string, so it does not sort reliably)
+    c.execute("SELECT id, topic, subject, score, total, date, details FROM practice_progress WHERE user_id = ? ORDER BY rowid DESC", (user["id"],))
     rows = c.fetchall()
     conn.close()
 
     result = []
     for r in rows:
+        details = None
+        if r[6]:
+            try:
+                parsed = json.loads(r[6])
+                details = parsed if isinstance(parsed, dict) else None
+            except (TypeError, json.JSONDecodeError):
+                details = None
         result.append({
             "id": r[0],
             "topic": r[1],
             "subject": r[2],
             "score": r[3],
             "total": r[4],
-            "date": r[5]
+            "date": r[5],
+            "details": details
         })
     return result
+
+@app.delete("/api/practice/{item_id}")
+async def delete_practice_progress(item_id: str, authorization: Optional[str] = Header(None)):
+    user = get_current_user(authorization)
+    conn = sqlite3.connect("cognilearn.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM practice_progress WHERE id = ? AND user_id = ?", (item_id, user["id"]))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
