@@ -456,13 +456,34 @@ NO HOMEWORK OR EXERCISES
 """
 
 
-def subject_teaching_guidance(subject: Optional[str]) -> str:
+_MATH_TOPIC_HINT = re.compile(
+    r"\b(solve|find|calculate|compute|evaluate|simplify|determine|how (?:many|much|long|far|old)|"
+    r"years?|ratio|percent(?:age)?|profit|loss|speed|distance|age|equation|integral|derivative|"
+    r"probability|area|volume|perimeter)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_math_problem(topic: Optional[str]) -> bool:
+    """True for quantitative word problems typed while the subject dropdown is still 'General'."""
+    t = topic or ""
+    return bool(re.search(r"\d", t)) and bool(_MATH_TOPIC_HINT.search(t))
+
+
+def subject_teaching_guidance(subject: Optional[str], topic: Optional[str] = None) -> str:
     """Add concise guidance for the selected subject without changing stream tags."""
     normalized = (subject or "General").strip().casefold()
-    if normalized in {"mathematics", "physics"}:
+    if normalized in {"mathematics", "physics"} or (normalized == "general" and looks_like_math_problem(topic)):
         return """
 SUBJECT GUIDANCE — MATHEMATICS / PHYSICS
-For a numerical problem, solve only the values given: use [POINT]s for the given values, formula, substitution, and calculation as needed, then state a clear final answer with units. Write those labels in the response language. Put equations in [MATH]. Check arithmetic, signs, and units. If essential information is missing, ask for it instead of inventing values. For conceptual questions or proofs, use a logical explanation rather than forcing the numerical format.
+For a numerical or word problem, teach it in exactly this order and carry the solution through to the final number (never stop after setting up the equation):
+1. [HEADING] with a short title for the problem.
+2. [POINT] "Question: ..." restating the problem in one or two plain sentences, then an [EXPLAIN] that reads the question aloud and says clearly what has to be found.
+3. The step-by-step method. For every step use: a [POINT] naming the step in plain words (for example "Step 2: Form the equation from the condition"), then a [MATH] holding that step's equation in raw LaTeX, then an [EXPLAIN] saying in spoken words why the step is done and what it gives. Show the substitution, the simplification and the result of each calculation. Check arithmetic, signs and units.
+4. [POINT] "Final Answer: ..." with the result and its units in plain words, then a [MATH] with the final result, then an [EXPLAIN] that verifies the answer against the question.
+5. [SUMMARY] in plain text.
+Keep the whole lesson within 8 [POINT] blocks by combining small steps. Write the labels (Question, Step, Final Answer) in the response language.
+Formatting rules for maths: put every equation in [MATH] as raw LaTeX only. Never write LaTeX or backslashes inside [HEADING], [POINT], [EXPLAIN], [WARNING] or [SUMMARY], and never use LaTeX delimiters such as backslash-parenthesis, backslash-bracket or dollar signs anywhere. In those tags write numbers as plain digits and operations in words. If essential information is missing, ask for it instead of inventing values. For conceptual questions or proofs, use a logical explanation instead of this format.
 """
     if normalized in {
         "computer science", "programming", "engineering", "iot",
@@ -1153,7 +1174,7 @@ async def start_lesson(req: TeachRequest, raw_request: Request, authorization: O
     topic_str = (req.topic or "").strip()
     subject_hint = f" (Subject hint: {req.subject})" if req.subject and req.subject != "General" else ""
 
-    system_prompt = TEACH_SYSTEM + subject_teaching_guidance(req.subject)
+    system_prompt = TEACH_SYSTEM + subject_teaching_guidance(req.subject, req.topic)
     messages = []
     mode = "text"
     num_chunks = 0
@@ -1357,7 +1378,7 @@ async def interrupt_lesson(req: InterruptRequest, raw_request: Request):
         "- NEVER put backslashes or LaTeX commands inside [EXPLAIN].\n"
     )
 
-    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject) + interrupt_addendum
+    interrupt_system = TEACH_SYSTEM + subject_teaching_guidance(req.subject, req.topic) + interrupt_addendum
 
     recent_history = req.history[-6:] if len(req.history) > 6 else req.history
 

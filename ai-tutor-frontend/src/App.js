@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import 'katex/dist/katex.min.css';
-import { BlockMath } from 'react-katex';
+import { BlockMath, InlineMath } from 'react-katex';
 import jsPDF from 'jspdf';
 
 import PracticeQuizzesPage from './components/PracticeQuizzesPage';
@@ -932,6 +932,59 @@ async function* streamEndpoint(endpoint, body, signal) {
   }
 }
 
+// ── Inline math support ───────────────────────────────────────────────────────
+// The model sometimes writes inline LaTeX such as \( x + 10 \) inside points or headings.
+// RichText renders those pieces with KaTeX; speakMath turns them into spoken words for TTS.
+const INLINE_MATH_RE = /(\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\]|\$\$[\s\S]+?\$\$|\$[^\s$][^$\n]*?[^\s$]\$|\$[^\s$]\$)/g;
+
+const stripMathDelimiters = (s) => s
+  .replace(/^(\\\(|\\\[|\$\$|\$)/, '')
+  .replace(/(\\\)|\\\]|\$\$|\$)$/, '')
+  .trim();
+
+const RichText = ({ text }) => {
+  const str = typeof text === 'string' ? text : '';
+  const parts = str.split(INLINE_MATH_RE);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (i % 2 === 1) {
+          const inner = stripMathDelimiters(part);
+          return <InlineMath key={i} math={inner} renderError={() => <span>{inner}</span>} />;
+        }
+        return <React.Fragment key={i}>{part}</React.Fragment>;
+      })}
+    </>
+  );
+};
+
+const latexToSpeech = (tex) => tex
+  .replace(/\\(?:left|right)/g, '')
+  .replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, ' $1 over $2 ')
+  .replace(/\\sqrt\s*\{([^{}]+)\}/g, ' square root of $1 ')
+  .replace(/\^\{?2\}?/g, ' squared ')
+  .replace(/\^\{?3\}?/g, ' cubed ')
+  .replace(/\^\{([^{}]+)\}/g, ' to the power $1 ')
+  .replace(/\^(\w)/g, ' to the power $1 ')
+  .replace(/_\{?([^{}\s]+)\}?/g, ' $1 ')
+  .replace(/\\(?:times|cdot)/g, ' times ')
+  .replace(/\\div/g, ' divided by ')
+  .replace(/\\pm/g, ' plus or minus ')
+  .replace(/\\neq/g, ' not equal to ')
+  .replace(/\\leq?/g, ' less than or equal to ')
+  .replace(/\\geq?/g, ' greater than or equal to ')
+  .replace(/\\pi/g, ' pi ')
+  .replace(/\\theta/g, ' theta ')
+  .replace(/\\[a-zA-Z]+/g, ' ')
+  .replace(/=/g, ' equals ')
+  .replace(/\+/g, ' plus ')
+  .replace(/[−–-]/g, ' minus ')
+  .replace(/[{}\\]/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const speakMath = (str) => str.replace(INLINE_MATH_RE, (m) => ' ' + latexToSpeech(stripMathDelimiters(m)) + ' ');
+
 // Common subject suggestions (hint only — does NOT control prompt logic)
 const SUBJECT_SUGGESTIONS = [
   'General', 'Mathematics', 'Physics', 'Chemistry', 'Biology',
@@ -1414,10 +1467,10 @@ export default function App() {
   // Sanitizes spoken text for Text-to-Speech without deleting the text body
   const stripSpokenText = (str) => {
     if (!str || typeof str !== 'string') return '';
-    return str
+    return speakMath(str)
       .replace(/\[LANG\][a-z]{0,5}(?:\[\/LANG\])?/gi, '')
       .replace(/\[\/?\s*[A-Z1-9_-]{2,20}\s*\]/gi, '')
-      .replace(/[{}]/g, '')
+      .replace(/[{}]/g, '').replace(/\\/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   };
@@ -1514,7 +1567,9 @@ export default function App() {
       } else {
         safeContent = rawContent
           .replace(/\[\/?(HEADING|POINT|IMAGE|EXPLAIN|DIAGRAM|QUESTION|QUIZ|WARNING|SUMMARY|LANG)\]/gi, '')
-          .trim();
+          .trim()
+          .replace(/^(\\\(|\\\[|\$\$|\$)\s*/, '')
+          .replace(/\s*(\\\)|\\\]|\$\$|\$)$/, '');
       }
 
       if (safeContent || tag === 'DIAGRAM') {
@@ -2692,21 +2747,21 @@ export default function App() {
       : '';
 
     switch(step.tag) {
-      case 'HEADING': return <h1 className="rendered-heading">{safe(step.content)}</h1>;
+      case 'HEADING': return <h1 className="rendered-heading"><RichText text={safe(step.content)} /></h1>;
       case 'POINT': return (
         <div className="rendered-point-row">
           <span className="point-bullet-marker">•</span>
-          <span className="point-text-content">{safe(step.content)}</span>
+          <span className="point-text-content"><RichText text={safe(step.content)} /></span>
         </div>
       );
       case 'EXPLAIN': return includeExplanation
-        ? <div className="recorded-explanation"><strong>Explanation</strong><div>{safeMultiline(step.content)}</div></div>
+        ? <div className="recorded-explanation"><strong>Explanation</strong><div><RichText text={safeMultiline(step.content)} /></div></div>
         : null;
       case 'MATH': {
         try {
           return (
             <div className="rendered-math-container">
-              <BlockMath math={step.content} />
+              <BlockMath math={step.content} renderError={() => <div className="rendered-warning">⚠️ Could not render this equation: {step.content}</div>} />
             </div>
           );
         } catch (e) {
@@ -2724,12 +2779,12 @@ export default function App() {
           <pre><code>{step.content}</code></pre>
         </div>
       );
-      case 'WARNING': return <div className="rendered-warning">⚠️ {safe(step.content)}</div>;
-      case 'QUESTION': return <div className="rendered-question">❓ {safe(step.content)}</div>;
+      case 'WARNING': return <div className="rendered-warning">⚠️ <RichText text={safe(step.content)} /></div>;
+      case 'QUESTION': return <div className="rendered-question">❓ <RichText text={safe(step.content)} /></div>;
       case 'QUIZ': return null; // Quiz blocks handled separately by PracticeQuizzesPage
       // SUMMARY header row (content is empty — points are rendered as individual POINT blocks)
       case 'SUMMARY': return step.content
-        ? <div className="rendered-summary">📌 {safe(step.content)}</div>
+        ? <div className="rendered-summary">📌 <RichText text={safe(step.content)} /></div>
         : <div className="rendered-summary" style={{fontWeight:'bold',opacity:0.85}}>📌 Summary</div>;
       default: return null;
     }
